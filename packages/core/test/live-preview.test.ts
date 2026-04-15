@@ -43,7 +43,7 @@ describe("live preview", () => {
       livePreview: true
     });
 
-    expect(container.querySelector("h1")?.textContent).toBe("Heading");
+    expect(container.querySelector("[data-heading-level='1']")?.textContent).toBe("Heading");
     expect(container.querySelector("blockquote")?.textContent).toBe("Quote");
     expect(container.querySelector("[data-live-preview-image]")?.getAttribute("data-live-preview-image")).toBe(
       "https://example.com/image.png"

@@ -60,9 +60,11 @@ export function createDefaultRenderer(context: LivePreviewRenderContext): HTMLEl
       return element;
     }
     case "heading": {
-      const element = document.createElement(`h${context.node.depth}`);
+      const element = document.createElement("span");
       element.textContent = context.text;
       element.style.display = "block";
+      element.style.fontWeight = "bold";
+      element.setAttribute("data-heading-level", String(context.node.depth));
       return element;
     }
     case "blockquote": {

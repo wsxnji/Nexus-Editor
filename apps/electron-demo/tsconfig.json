@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "paths": {
+      "@nexus/core": ["../../packages/core/src/index.ts"],
+      "@nexus/preset-gfm": ["../../packages/preset-gfm/src/index.ts"],
+      "@nexus/plugin-history": ["../../packages/plugin-history/src/index.ts"]
+    }
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "electron/**/*.ts",
+    "test/**/*.ts"
+  ]
+}

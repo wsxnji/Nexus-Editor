@@ -21,7 +21,7 @@ function isLivePreviewNode(node: Content): node is LivePreviewNode {
   );
 }
 
-function selectionIntersects(
+export function selectionIntersects(
   from: number,
   to: number,
   selection: readonly SelectionRange[]
@@ -81,13 +81,21 @@ function visit(
     const to = child.position?.end.offset;
 
     if (typeof from === "number" && typeof to === "number" && isLivePreviewNode(child)) {
+      if (child.type === "heading") {
+        // Headings are always emitted regardless of cursor position.
+        // buildDecorations decides prefix treatment (hide vs dim) based on cursor.
+        ranges.push({ from, to, node: child, source: doc.slice(from, to) });
+
+        // Always recurse into heading children so inline elements
+        // (bold, italic, etc.) get their own decorations.
+        if ("children" in child && Array.isArray(child.children)) {
+          visit(child, doc, selection, ranges);
+        }
+        continue;
+      }
+
       if (!selectionIntersects(from, to, selection)) {
-        ranges.push({
-          from,
-          to,
-          node: child,
-          source: doc.slice(from, to)
-        });
+        ranges.push({ from, to, node: child, source: doc.slice(from, to) });
         continue;
       }
     }

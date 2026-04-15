@@ -1,8 +1,8 @@
-import { RangeSetBuilder, type Extension, type SelectionRange } from "@codemirror/state";
-import { Decoration, EditorView, ViewPlugin, WidgetType } from "@codemirror/view";
-import type { Root } from "mdast";
+import { type Extension, type Range, type SelectionRange } from "@codemirror/state";
+import { Decoration, type DecorationSet, EditorView, ViewPlugin, WidgetType } from "@codemirror/view";
+import type { Heading, Root } from "mdast";
 
-import { collectLivePreviewRanges } from "./live-preview-ranges";
+import { collectLivePreviewRanges, selectionIntersects } from "./live-preview-ranges";
 import { renderLivePreviewNode } from "./live-preview-renderers";
 import type {
   LivePreviewConfig,
@@ -66,31 +66,92 @@ function createWidget(element: HTMLElement): WidgetType {
   })();
 }
 
+const HEADING_FONT_SIZE: Record<number, string> = {
+  1: "1.6em",
+  2: "1.4em",
+  3: "1.2em",
+  4: "1.1em",
+  5: "1.05em",
+  6: "1em"
+};
+
+function buildHeadingDecorations(
+  range: { from: number; to: number; node: Heading },
+  selection: readonly SelectionRange[],
+  decos: Range<Decoration>[]
+): void {
+  const firstChild = range.node.children[0];
+  const textStart = firstChild?.position?.start?.offset;
+
+  if (typeof textStart === "number" && textStart > range.from && textStart <= range.to) {
+    const fontSize = HEADING_FONT_SIZE[range.node.depth] ?? "1em";
+    const cursorOnHeading = selectionIntersects(range.from, range.to, selection);
+
+    if (cursorOnHeading) {
+      // Cursor on heading: show # prefix dimmed, same size as heading text
+      decos.push(
+        Decoration.mark({
+          attributes: { style: `font-weight: bold; font-size: ${fontSize}; color: #aaa` }
+        }).range(range.from, textStart)
+      );
+    } else {
+      // Cursor away: hide # prefix
+      decos.push(Decoration.replace({}).range(range.from, textStart));
+    }
+
+    // Text is always bold + sized regardless of cursor position
+    decos.push(
+      Decoration.mark({
+        attributes: {
+          style: `font-weight: bold; font-size: ${fontSize}`,
+          "data-heading-level": String(range.node.depth)
+        }
+      }).range(textStart, range.to)
+    );
+  }
+}
+
 function buildDecorations(
   view: EditorView,
   parser: ParserLike,
   config: NormalizedLivePreviewConfig
-) {
+): DecorationSet {
   if (!config.enabled) {
     return Decoration.none;
   }
 
   const doc = view.state.doc.toString();
   const ast = parseDocument(parser, doc);
-  const builder = new RangeSetBuilder<Decoration>();
   const ranges = collectLivePreviewRanges(ast, doc, view.state.selection.ranges);
+  const decos: Range<Decoration>[] = [];
+
+  const headingSpans: [number, number][] = [];
 
   for (const range of ranges) {
-    builder.add(
-      range.from,
-      range.to,
-      Decoration.replace({
-        widget: createWidget(renderLivePreviewNode(range.node, range.source, config.renderers))
-      })
-    );
+    // When a heading uses widget-replace (custom renderer), skip child ranges inside it
+    if (headingSpans.some(([from, to]) => range.from >= from && range.to <= to)) {
+      continue;
+    }
+
+    if (range.node.type === "heading" && !config.renderers.heading) {
+      buildHeadingDecorations(
+        range as { from: number; to: number; node: Heading },
+        view.state.selection.ranges,
+        decos
+      );
+    } else {
+      if (range.node.type === "heading") {
+        headingSpans.push([range.from, range.to]);
+      }
+      decos.push(
+        Decoration.replace({
+          widget: createWidget(renderLivePreviewNode(range.node, range.source, config.renderers))
+        }).range(range.from, range.to)
+      );
+    }
   }
 
-  return builder.finish();
+  return Decoration.set(decos, true);
 }
 
 export function createLivePreviewExtension(

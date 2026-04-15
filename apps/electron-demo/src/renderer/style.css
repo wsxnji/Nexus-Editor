@@ -1,0 +1,47 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  font-family: system-ui, sans-serif;
+}
+
+.toolbar {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #f0f0f0;
+  border-bottom: 1px solid #ddd;
+}
+
+.toolbar button {
+  padding: 4px 12px;
+  cursor: pointer;
+}
+
+.status-line {
+  padding: 4px 12px;
+  font-size: 13px;
+  color: #666;
+  background: #fafafa;
+  border-bottom: 1px solid #eee;
+}
+
+.editor-container {
+  flex: 1;
+  overflow: auto;
+}
+
+.editor-container .cm-editor {
+  height: 100%;
+}
