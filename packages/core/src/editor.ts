@@ -132,6 +132,10 @@ export function createEditor(config: EditorConfig): EditorAPI {
       return view.state.doc.toString();
     },
     setDocument(next) {
+      if (destroyed) {
+        return;
+      }
+
       view.dispatch({
         changes: {
           from: 0,
@@ -141,14 +145,26 @@ export function createEditor(config: EditorConfig): EditorAPI {
       });
     },
     focus() {
+      if (destroyed) {
+        return;
+      }
+
       view.focus();
       setFocused(true);
     },
     blur() {
+      if (destroyed) {
+        return;
+      }
+
       view.contentDOM.blur();
       setFocused(false);
     },
     runShortcut(key) {
+      if (destroyed) {
+        return false;
+      }
+
       const shortcut = shortcuts.find((entry) => entry.key === key);
       return shortcut ? shortcut.run(api) : false;
     },

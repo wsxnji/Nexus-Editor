@@ -244,4 +244,31 @@ describe("createEditor", () => {
     expect(editor.getDocument()).toBe("shortcut-keyboard");
     editor.destroy();
   });
+
+  it("stops emitting updates after destroy", () => {
+    const container = document.createElement("div");
+    const docs: string[] = [];
+    const events: string[] = [];
+    const editor = createEditor({
+      container,
+      onChange(doc) {
+        docs.push(doc);
+      },
+      onFocus() {
+        events.push("focus");
+      },
+      onBlur() {
+        events.push("blur");
+      }
+    });
+
+    editor.destroy();
+
+    expect(() => editor.setDocument("after-destroy")).not.toThrow();
+    expect(() => editor.focus()).not.toThrow();
+    expect(() => editor.blur()).not.toThrow();
+
+    expect(docs).toEqual([]);
+    expect(events).toEqual([]);
+  });
 });
