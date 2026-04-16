@@ -416,10 +416,10 @@ export class EditableTableWidget extends WidgetType {
 
     function onDragMove(e: MouseEvent): void {
       e.preventDefault();
+      if (!wrapper.isConnected) { onDragEnd(); return; }
       const wrapperRect = wrapper.getBoundingClientRect();
 
       if (draggingCol >= 0) {
-        // Move floating pill horizontally, constrained to content columns
         const bounds = getContentBounds();
         const clampedX = Math.max(bounds.left, Math.min(e.clientX, bounds.right));
         floatingPill.style.left = (clampedX - wrapperRect.left - 8) + "px";
@@ -454,12 +454,14 @@ export class EditableTableWidget extends WidgetType {
     }
 
     function onDragEnd(): void {
-      if (draggingCol >= 0 && dropTargetCol >= 0 && dropTargetCol !== draggingCol) {
-        self.moveColumn(draggingCol, dropTargetCol);
-      }
-      if (draggingRow >= 0 && dropTargetRow >= 0 && dropTargetRow !== draggingRow) {
-        self.moveRow(draggingRow, dropTargetRow);
-      }
+      const movedCol = draggingCol >= 0 && dropTargetCol >= 0 && dropTargetCol !== draggingCol;
+      const movedRow = draggingRow >= 0 && dropTargetRow >= 0 && dropTargetRow !== draggingRow;
+      const savedDragCol = draggingCol;
+      const savedDropCol = dropTargetCol;
+      const savedDragRow = draggingRow;
+      const savedDropRow = dropTargetRow;
+
+      // Clean up visual state FIRST
       clearDragHighlights();
       hideIndicators();
       floatingPill.style.display = "none";
@@ -467,13 +469,18 @@ export class EditableTableWidget extends WidgetType {
       gripRow.style.opacity = "0";
       draggingCol = -1;
       draggingRow = -1;
-      // Release editing lock — allow CM6 to rebuild widget
-      self.editing = false;
-      tableEditingCount--;
       document.removeEventListener("mousemove", onDragMove);
       document.removeEventListener("mouseup", onDragEnd);
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
+
+      // Release editing lock BEFORE dispatch so the resulting update rebuilds widget
+      self.editing = false;
+      tableEditingCount--;
+
+      // Now dispatch the move — this triggers a full decoration rebuild with new source
+      if (movedCol) self.moveColumn(savedDragCol, savedDropCol);
+      if (movedRow) self.moveRow(savedDragRow, savedDropRow);
     }
 
     function startColDrag(colIdx: number, startX: number): void {
@@ -660,9 +667,7 @@ export class EditableTableWidget extends WidgetType {
 
         td.addEventListener("focus", () => { self.editing = true; tableEditingCount++; clearRangeSelection(); });
         td.addEventListener("blur", () => {
-          // Don't clear editing lock if a grip drag is active —
-          // grip mousedown sets editing=true, then cell blur fires async
-          // and would undo the lock, causing CM6 to recreate widget mid-drag
+          // Don't clear editing lock if a grip drag is active
           if (draggingCol < 0 && draggingRow < 0) {
             self.editing = false;
             tableEditingCount--;

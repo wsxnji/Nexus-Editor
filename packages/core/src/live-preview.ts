@@ -466,8 +466,9 @@ export function createLivePreviewExtension(
       return buildDecorations(state.doc.toString(), state.selection.ranges, parser, normalized, viewRef);
     },
     update(decos: DecorationSet, tr: Transaction) {
-      if (tr.docChanged && isTableEditing()) {
-        return decos.map(tr.changes);
+      if (isTableEditing()) {
+        // During table editing/dragging: only remap positions, never rebuild
+        return tr.docChanged ? decos.map(tr.changes) : decos;
       }
       if (tr.docChanged || tr.selection) {
         return buildDecorations(tr.state.doc.toString(), tr.state.selection.ranges, parser, normalized, viewRef);
