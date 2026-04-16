@@ -228,25 +228,23 @@ function buildCodeBlockDecorations(
       lineOffset += lines[li].length + 1;
     }
   } else {
-    // ── View mode: fences hidden, language label top-right ──
-    // Hide opening fence line: replace ```lang\n (including newline)
-    if (firstNewline >= 0) {
-      decos.push(Decoration.replace({}).range(range.from, range.from + firstNewline + 1));
-    }
-    // Hide closing fence line: replace \n``` (including preceding newline)
-    if (lastNewline > firstNewline) {
-      decos.push(Decoration.replace({}).range(range.from + lastNewline, range.to));
-    }
+    // ── View mode: fences hidden via CSS (not cross-newline replace), content styled ──
+    const HIDE_LINE = "height:0;padding:0;margin:0;overflow:hidden;font-size:0;line-height:0;min-height:0;";
 
-    // Line decorations on content lines only
     let lineOffset = range.from;
     for (let li = 0; li < lines.length; li++) {
       const lineStart = lineOffset;
+      const lineEnd = lineOffset + lines[li].length;
       const isFirstLine = li === 0;
       const isLastLine = li === lines.length - 1;
 
-      if (!isFirstLine && !isLastLine) {
-        // First content line gets top radius, last content line gets bottom radius
+      if (isFirstLine || isLastLine) {
+        // Hide fence lines via line CSS + replace text content
+        decos.push(Decoration.line({ attributes: { style: HIDE_LINE } }).range(lineStart));
+        if (lineEnd > lineStart) {
+          decos.push(Decoration.replace({}).range(lineStart, lineEnd));
+        }
+      } else {
         const isFirstContent = li === 1;
         const isLastContent = li === lines.length - 2;
         decos.push(Decoration.line({
@@ -258,7 +256,7 @@ function buildCodeBlockDecorations(
         }).range(lineStart));
       }
 
-      lineOffset += lines[li].length + 1;
+      lineOffset = lineEnd + 1;
     }
 
     // Language label (right-aligned on first content line)
