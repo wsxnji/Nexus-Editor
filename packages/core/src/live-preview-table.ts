@@ -47,6 +47,12 @@ export class EditableTableWidget extends WidgetType {
 
   ignoreEvent(): boolean { return true; }
 
+  get estimatedHeight(): number {
+    const rows = this.node.children?.length ?? 1;
+    // rows × ~32px (cell padding + text) + 16px wrapper padding (8px top + 8px bottom)
+    return rows * 32 + 16;
+  }
+
   private dispatch(newSource: string): void {
     const v = this.viewRef.current;
     if (!v) return;
@@ -139,7 +145,10 @@ export class EditableTableWidget extends WidgetType {
     // ── Root wrapper ──
     const wrapper = document.createElement("div");
     wrapper.className = "nexus-table-wrapper";
-    wrapper.style.cssText = "display:inline-block;position:relative;margin:8px 0;user-select:none;";
+    // CRITICAL: use padding, not margin. CM6 measures block widget height via
+    // getBoundingClientRect which EXCLUDES margin. margin:8px caused 16px of
+    // untracked height per table → cumulative click-drift below every table.
+    wrapper.style.cssText = "display:inline-block;position:relative;padding:8px 0;user-select:none;";
 
     // ── Table ──
     const table = document.createElement("table");
