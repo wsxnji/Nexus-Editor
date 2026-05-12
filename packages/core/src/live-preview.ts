@@ -1,9 +1,10 @@
 import { type EditorState, StateField, type Extension, type Range, type SelectionRange, type Transaction } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, WidgetType } from "@codemirror/view";
+import { ensureSyntaxTree } from "@codemirror/language";
 import type { Code, FootnoteDefinition, FootnoteReference, Heading, List, Root, Table } from "mdast";
 
 import type { CodeHighlightToken } from "./types";
-import { lezerTreeToMdast } from "./lezer-mdast-adapter";
+import { lezerStringToMdast, lezerTreeToMdast } from "./lezer-mdast-adapter";
 import { highlightCodeBlock } from "./live-preview-highlight";
 
 import { createLivePreviewDiagnostics } from "./live-preview-diag";
@@ -34,7 +35,9 @@ function createEmptyAst(): Root {
 
 function parseFromState(state: EditorState): Root {
   try {
-    return lezerTreeToMdast(state);
+    const tree = ensureSyntaxTree(state, state.doc.length, 50);
+    if (tree) return lezerTreeToMdast(state, tree);
+    return lezerStringToMdast(state.doc.toString());
   } catch {
     return createEmptyAst();
   }

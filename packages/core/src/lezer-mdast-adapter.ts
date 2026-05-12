@@ -608,8 +608,8 @@ function walkRoot(tree: Tree, source: Source): Root {
   };
 }
 
-export function lezerTreeToMdast(state: EditorState): Root {
-  return walkRoot(syntaxTree(state), stateSource(state));
+export function lezerTreeToMdast(state: EditorState, tree: Tree = syntaxTree(state)): Root {
+  return walkRoot(tree, stateSource(state));
 }
 
 // Headless string parser — used by editor.ts for the initial currentAst

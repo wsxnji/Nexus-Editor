@@ -122,7 +122,12 @@ function visit(
     if (typeof from === "number" && typeof to === "number" && isLivePreviewNode(child)) {
       if (shouldSkipInsideWikiLink(child, from, to, wikiLinkSpans)) continue;
 
-      if (child.type === "heading" || child.type === "table" || child.type === "list" || child.type === "code" || child.type === "definition") {
+      if (child.type === "table") {
+        ranges.push({ from, to, node: child, source: doc.slice(from, to) });
+        continue;
+      }
+
+      if (child.type === "heading" || child.type === "list" || child.type === "code" || child.type === "definition") {
         // Always emitted regardless of cursor position.
         // buildDecorations decides decoration treatment based on cursor.
         ranges.push({ from, to, node: child, source: doc.slice(from, to) });

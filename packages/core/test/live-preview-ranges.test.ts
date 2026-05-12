@@ -4,6 +4,7 @@ import remarkParse from "remark-parse";
 import { unified } from "unified";
 import { describe, expect, it } from "vitest";
 
+import { lezerStringToMdast } from "../src/lezer-mdast-adapter";
 import { collectLivePreviewRanges } from "../src/live-preview-ranges";
 
 function parse(markdown: string): Root {
@@ -39,5 +40,23 @@ describe("live preview ranges", () => {
       [EditorSelection.cursor(doc.length)]
     );
     expect(rangesDiffLine.map((r) => r.node.type)).toEqual(["strong", "emphasis"]);
+  });
+
+  it("does not emit inline ranges inside table widgets", () => {
+    const doc = [
+      "| Source | Address |",
+      "|---|---|",
+      "| 百度热搜 | `https://top.baidu.com/board?tab=realtime` and [link](https://example.com) |",
+      "",
+      "## After",
+    ].join("\n");
+
+    const ranges = collectLivePreviewRanges(
+      lezerStringToMdast(doc),
+      doc,
+      [EditorSelection.cursor(doc.length)]
+    );
+
+    expect(ranges.map((range) => range.node.type)).toEqual(["table", "heading"]);
   });
 });
