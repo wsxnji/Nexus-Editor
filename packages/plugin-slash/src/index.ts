@@ -1,100 +1,45 @@
+import {
+  computeSlashState,
+  filterSlashCommands,
+  getSlashMatch,
+  type SlashMatch,
+  type SlashStateOptions,
+  type SlashStateResult,
+} from "@floatboat/nexus-core";
 import type { NexusPlugin, SlashCommandDef } from "@floatboat/nexus-core";
 
-export interface SlashMatch {
-  from: number;
-  to: number;
-  query: string;
-}
+export type SlashState = SlashStateResult;
+export type { SlashMatch, SlashStateOptions, SlashStateResult };
+export { filterSlashCommands, getSlashMatch };
 
-export interface SlashState {
-  isOpen: boolean;
-  from: number | null;
-  to: number | null;
-  query: string;
-  commands: SlashCommandDef[];
+/**
+ * Compute the slash menu state for the given document + caret. Kept as
+ * an alias of the core helper so SDK consumers don't have to import from
+ * two packages. Forward-compatible with the `{ limit }` option.
+ */
+export function getSlashState(
+  doc: string,
+  cursor: number,
+  commands: SlashCommandDef[],
+  options?: SlashStateOptions
+): SlashStateResult {
+  return computeSlashState(doc, cursor, commands, options);
 }
 
 export interface SlashPlugin extends NexusPlugin {
   slashCommands: SlashCommandDef[];
 }
 
-export function getSlashMatch(doc: string, cursor: number): SlashMatch | null {
-  const beforeCursor = doc.slice(0, cursor);
-  const lineStart = beforeCursor.lastIndexOf("\n") + 1;
-  const lineText = beforeCursor.slice(lineStart);
-  const slashIndex = lineText.lastIndexOf("/");
-
-  if (slashIndex === -1) {
-    return null;
-  }
-
-  const charBeforeSlash = slashIndex === 0 ? "" : lineText[slashIndex - 1];
-
-  if (charBeforeSlash && /\S/.test(charBeforeSlash)) {
-    return null;
-  }
-
-  const query = lineText.slice(slashIndex + 1);
-
-  if (/\s/.test(query)) {
-    return null;
-  }
-
-  return {
-    from: lineStart + slashIndex,
-    to: cursor,
-    query
-  };
-}
-
-export function filterSlashCommands(
-  commands: SlashCommandDef[],
-  query: string
-): SlashCommandDef[] {
-  const normalizedQuery = query.trim().toLowerCase();
-
-  if (!normalizedQuery) {
-    return commands;
-  }
-
-  return commands.filter((command) => {
-    const haystacks = [command.title, ...(command.keywords ?? [])].map((value) =>
-      value.toLowerCase()
-    );
-
-    return haystacks.some((value) => value.includes(normalizedQuery));
-  });
-}
-
-export function getSlashState(
-  doc: string,
-  cursor: number,
-  commands: SlashCommandDef[]
-): SlashState {
-  const match = getSlashMatch(doc, cursor);
-
-  if (!match) {
-    return {
-      isOpen: false,
-      from: null,
-      to: null,
-      query: "",
-      commands: []
-    };
-  }
-
-  return {
-    isOpen: true,
-    from: match.from,
-    to: match.to,
-    query: match.query,
-    commands: filterSlashCommands(commands, match.query)
-  };
-}
-
 export function createSlashPlugin(commands: SlashCommandDef[]): SlashPlugin {
   return {
     name: "plugin-slash",
-    slashCommands: commands
+    slashCommands: commands,
   };
 }
+
+export {
+  createSlashMenuUI,
+  type SlashMenuUI,
+  type SlashMenuUIOptions,
+  type SlashMenuCommandContext,
+} from "./menu-ui";
