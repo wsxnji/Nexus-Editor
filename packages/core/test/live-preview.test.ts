@@ -551,6 +551,42 @@ describe("live preview", () => {
     editor.destroy();
   });
 
+  it("marks table ranges as atomic so vertical cursor motion skips over them", () => {
+    const container = document.createElement("div");
+    let capturedView: EditorView | null = null;
+    const captureView = ViewPlugin.fromClass(
+      class {
+        constructor(readonly view: EditorView) {
+          capturedView = view;
+        }
+      }
+    );
+    const editor = createEditor({
+      container,
+      initialValue: "before\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\nafter",
+      livePreview: true,
+      plugins: [createGfmPreset(), { name: "capture", cmExtensions: [captureView] }]
+    });
+    const view = requireEditorView(capturedView);
+    // 光标离开表格，使其渲染为不可逐字进入的 block widget。
+    editor.setSelection(0);
+
+    const tablePos = editor.getDocument().indexOf("| A");
+    const providers = view.state.facet(EditorView.atomicRanges);
+    let coversTable = false;
+    for (const provider of providers) {
+      const set = provider(view);
+      const iter = set.iter();
+      while (iter.value) {
+        if (iter.from <= tablePos && tablePos < iter.to) coversTable = true;
+        iter.next();
+      }
+    }
+    // 表格范围被登记为原子区间 → 方向键上下移动会把它当整体跳过，光标不再卡在折叠的源码里。
+    expect(coversTable).toBe(true);
+    editor.destroy();
+  });
+
   it("enables table cell editing after a single-cell click", () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -583,6 +619,53 @@ describe("live preview", () => {
     }));
 
     expect(cell?.contentEditable).toBe("true");
+    editor.destroy();
+    container.remove();
+  });
+
+  it("moves between table cells with up/down arrow keys", () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const editor = createEditor({
+      container,
+      initialValue: "| A | B |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |",
+      livePreview: true,
+      plugins: [createGfmPreset()]
+    });
+
+    const dataRows = Array.from(container.querySelectorAll<HTMLElement>("tr")).filter((row) =>
+      row.querySelector(".nexus-cell")
+    );
+    const cellOf = (rowIndex: number, colIndex: number): HTMLElement =>
+      dataRows[rowIndex].querySelectorAll<HTMLElement>(".nexus-cell")[colIndex];
+
+    // 激活第 2 行第 1 列（"1"）。
+    // 注：jsdom 不把 contentEditable 元素当可聚焦，focus() 不更新 activeElement，
+    // 因此这里用「事件是否被消费 + 目标单元格是否被激活为可编辑」来判定导航，
+    // focus 的真实落点由 E2E 在真实 Chromium 中覆盖。
+    const start = cellOf(1, 0);
+    start.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, clientX: 80, clientY: 40 }));
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, clientX: 80, clientY: 40 }));
+    expect(start.contentEditable).toBe("true");
+
+    // ↓ 激活第 3 行第 1 列（"3"），并消费事件。
+    const downEvent = new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true });
+    start.dispatchEvent(downEvent);
+    expect(downEvent.defaultPrevented).toBe(true);
+    const bottom = cellOf(2, 0);
+    expect(bottom.contentEditable).toBe("true");
+
+    // ↓ 在最后一行到达边界，不消费（交回默认）。
+    const downAtBottom = new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true });
+    bottom.dispatchEvent(downAtBottom);
+    expect(downAtBottom.defaultPrevented).toBe(false);
+
+    // ↑ 从底行回到第 2 行第 1 列（"1"）。
+    const upEvent = new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true });
+    bottom.dispatchEvent(upEvent);
+    expect(upEvent.defaultPrevented).toBe(true);
+    expect(start.contentEditable).toBe("true");
+
     editor.destroy();
     container.remove();
   });
@@ -1267,6 +1350,64 @@ describe("live preview", () => {
     expect(inputs.length).toBe(2);
     expect(inputs[0].checked).toBe(true);
     expect(inputs[1].checked).toBe(false);
+    editor.destroy();
+  });
+
+  it("toggles a GFM task checkbox on click (widget handles its own event)", () => {
+    const container = document.createElement("div");
+    const editor = createEditor({
+      container,
+      initialValue: "intro\n\n- [ ] open item\n- [x] done item\n\nend",
+      livePreview: true,
+      plugins: [createGfmPreset()]
+    });
+
+    // 光标放在文末 end 行（不在任一任务行）→ 两个复选框都渲染。
+    editor.setSelection(editor.getDocument().length);
+    const inputs = container.querySelectorAll<HTMLInputElement>("input[type=checkbox]");
+    expect(inputs.length).toBe(2);
+
+    // 点击第一个未勾选的复选框 → 源码 `[ ]` 应被切换为 `[x]`。
+    inputs[0].click();
+    expect(editor.getDocument()).toBe("intro\n\n- [x] open item\n- [x] done item\n\nend");
+    editor.destroy();
+  });
+
+  it("reveals raw task markup when the caret is on that item's head line", () => {
+    const container = document.createElement("div");
+    const editor = createEditor({
+      container,
+      initialValue: "- [ ] alpha\n- [ ] beta",
+      livePreview: true,
+      plugins: [createGfmPreset()]
+    });
+
+    // 光标落在第一行（alpha 项）→ 该行露出 `- [ ] ` 原文，复选框消失；
+    // 第二行（beta 项）仍渲染复选框。
+    editor.setSelection(3);
+    const inputs = container.querySelectorAll<HTMLInputElement>("input[type=checkbox]");
+    expect(inputs.length).toBe(1);
+    const text = container.textContent ?? "";
+    expect(text).toContain("- [ ] alpha");
+    editor.destroy();
+  });
+
+  it("keeps ordered-list numbering stable when one item reveals its raw marker", () => {
+    const container = document.createElement("div");
+    const editor = createEditor({
+      container,
+      initialValue: "1. one\n2. two\n3. three",
+      livePreview: true,
+      plugins: [createGfmPreset()]
+    });
+
+    // 光标落在第二项 → 该行露出 `2. ` 原文，但第三项仍须渲染为 `3. `
+    // （不能因第二项被跳过而把第三项错误重编号成 `2. `）。
+    editor.setSelection(9);
+    const text = container.textContent ?? "";
+    expect(text).toContain("1. ");
+    expect(text).toContain("3. ");
+    expect(text).not.toContain("4. ");
     editor.destroy();
   });
 

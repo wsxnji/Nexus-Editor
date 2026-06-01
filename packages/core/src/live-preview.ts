@@ -1,4 +1,4 @@
-import { type EditorState, StateEffect, StateField, type Extension, type Range, type SelectionRange, type Transaction } from "@codemirror/state";
+import { type EditorState, RangeSet, RangeSetBuilder, StateEffect, StateField, type Extension, type Range, type SelectionRange, type Transaction } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, WidgetType } from "@codemirror/view";
 import { ensureSyntaxTree } from "@codemirror/language";
 import type { Code, FootnoteDefinition, FootnoteReference, Heading, Html, List, Root, Table } from "mdast";
@@ -476,6 +476,7 @@ const CHECKBOX_RE = /^\[([ xX])\] /;
 function buildListDecorations(
   range: { from: number; to: number; node: List },
   doc: string,
+  selection: readonly SelectionRange[],
   decos: Range<Decoration>[],
   viewRef: { current: EditorView | null }
 ): void {
@@ -498,6 +499,16 @@ function buildListDecorations(
     const markerMatch = LIST_MARKER_RE.exec(headLine);
     if (!markerMatch) continue;
 
+    // 预先占用本项的序号：即便下面因光标落在本行而露出原始 marker，
+    // 它仍占一个序号，避免兄弟项被重新编号。
+    const ordinal = orderNum;
+    if (isOrdered) orderNum++;
+
+    // Obsidian 式实时预览：光标落在本项首行时，显示原始 `- [ ] ` / `1. `
+    // 源码以便直接编辑；其余项保持渲染后的圆点 / 复选框。inclusiveEnd
+    // 让光标停在行尾（按 End 后）也算在行内。
+    if (selectionIntersects(itemFrom, headLineEnd, selection, true)) continue;
+
     const indent = markerMatch[1];
     const markerStart = itemFrom + indent.length;
     const markerEnd = itemFrom + markerMatch[0].length;
@@ -505,11 +516,9 @@ function buildListDecorations(
     const bullet = document.createElement("span");
     let bulletKey: string;
     if (isOrdered) {
-      const n = orderNum;
-      bullet.textContent = `${n}. `;
+      bullet.textContent = `${ordinal}. `;
       bullet.style.color = "var(--nexus-text-muted)";
-      bulletKey = `bullet:ord:${n}:${markerStart}-${markerEnd}`;
-      orderNum++;
+      bulletKey = `bullet:ord:${ordinal}:${markerStart}-${markerEnd}`;
     } else {
       bullet.textContent = "\u2022 ";
       bullet.style.color = "var(--nexus-text-muted)";
@@ -536,6 +545,9 @@ function buildListDecorations(
       checkbox.style.cursor = "pointer";
 
       const toggleFrom = checkStart + 1;
+      // mousedown 先于 click：阻止 CM6 在 widget 上启动选区拖拽 / 移动光标，
+      // 否则点击会被解读成"把光标放到该行"而非切换复选框。
+      checkbox.addEventListener("mousedown", (e) => { e.preventDefault(); });
       checkbox.addEventListener("click", (e) => {
         e.preventDefault();
         const v = viewRef.current;
@@ -548,7 +560,9 @@ function buildListDecorations(
       const taskKey = `task:${checkStart}-${checkEnd}:${isChecked ? "x" : " "}`;
       decos.push(
         Decoration.replace({
-          widget: createWidget(checkbox, false, undefined, taskKey),
+          // swallowEvents=true → ignoreEvent() 返回 true，CM6 不再抢占点击，
+          // 复选框自身的 click 处理器得以触发完成切换。
+          widget: createWidget(checkbox, true, undefined, taskKey),
         }).range(checkStart, checkEnd)
       );
 
@@ -1056,7 +1070,7 @@ function buildDecorations(
         viewRef
       );
     } else if (range.node.type === "list") {
-      buildListDecorations(range as { from: number; to: number; node: List }, doc, decos, viewRef);
+      buildListDecorations(range as { from: number; to: number; node: List }, doc, selection, decos, viewRef);
     } else if (range.node.type === "blockquote") {
       const alertInfo = buildBlockquoteDecorations(
         range as { from: number; to: number; source: string },
@@ -1283,17 +1297,27 @@ export function createLivePreviewExtension(
   const rebuildForCompositionStart = StateEffect.define<null>();
   const rebuildAfterComposition = StateEffect.define<null>();
 
-  function build(state: EditorState, selection: readonly SelectionRange[], reuseCache: boolean) {
+  function build(state: EditorState, selection: readonly SelectionRange[], reuseCache: boolean): DecorationSet {
     const docStr = state.doc.toString();
     const ctx: BuildContext = reuseCache && lastBuilt && lastBuilt.doc === docStr
       ? { ast: lastBuilt.ast, codeTokens: lastBuilt.codeTokens }
       : {};
-    const out = buildDecorations(state, selection, normalized, viewRef, {
-      ...ctx,
-      compositionActive,
-    });
-    lastBuilt = { doc: docStr, ast: out.ast, codeTokens: out.codeTokens };
-    return out.decos;
+    try {
+      const out = buildDecorations(state, selection, normalized, viewRef, {
+        ...ctx,
+        compositionActive,
+      });
+      lastBuilt = { doc: docStr, ast: out.ast, codeTokens: out.codeTokens };
+      return out.decos;
+    } catch (err) {
+      // 任何 decoration 构建异常都不得让编辑器白屏：降级为"无 live-preview 的原始
+      // markdown"（仍可编辑），并缓存空 AST，避免后续 selection-only 重建反复抛同样的错。
+      // 文档再次变更（docChanged，reuseCache=false）会重新尝试完整构建并自动恢复。
+      // eslint-disable-next-line no-console
+      console.error("[NexusEditor] live-preview build failed; rendering raw markdown for this view", err);
+      lastBuilt = { doc: docStr, ast: createEmptyAst(), codeTokens: [] };
+      return Decoration.none;
+    }
   }
 
   const field = StateField.define<DecorationSet>({
@@ -1422,5 +1446,26 @@ export function createLivePreviewExtension(
     }
   });
 
-  return [field, viewCapture, compositionHandler, linkHandler, createLivePreviewDiagnostics()];
+  // 表格被渲染成 block replace widget（整段源码折叠成一个不可逐字进入的部件），
+  // 若不告诉 CodeMirror 这是原子区间，方向键上下移动时光标会"掉进"被折叠隐藏的
+  // 表格源码里而卡住。把每个表格 widget 的范围登记为 atomicRange，让光标把表格当作
+  // 一个整体跳过——上方按 ↓ 直接落到表格下一行，下方按 ↑ 直接回到表格上一行。
+  // 单元格编辑仍走点击 + contentEditable（widget ignoreEvent），不受影响。
+  const tableAtomicRanges = EditorView.atomicRanges.of((view) => {
+    const decoSet = view.state.field(field, false);
+    if (!decoSet || decoSet.size === 0) return RangeSet.empty;
+
+    const builder = new RangeSetBuilder<Decoration>();
+    const iter = decoSet.iter();
+    while (iter.value) {
+      const spec = (iter.value as { spec?: { widget?: unknown } }).spec;
+      if (iter.to > iter.from && spec?.widget instanceof EditableTableWidget) {
+        builder.add(iter.from, iter.to, iter.value);
+      }
+      iter.next();
+    }
+    return builder.finish();
+  });
+
+  return [field, viewCapture, compositionHandler, linkHandler, tableAtomicRanges, createLivePreviewDiagnostics()];
 }

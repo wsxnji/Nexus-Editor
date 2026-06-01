@@ -25,7 +25,17 @@ import { markdownKeymap } from "./markdown-keymap";
 import { indentationMarkers } from "@replit/codemirror-indentation-markers";
 import { createThemeExtension, lightTheme, type NexusTheme } from "./theme";
 import { computeSlashState } from "./slash-state";
-import type { EditorAPI, EditorConfig, EditorEventMap, NexusPlugin, ParserLike, TocEntry } from "./types";
+import type {
+  EditorAPI,
+  EditorCommand,
+  EditorConfig,
+  EditorEventContext,
+  EditorEventHandler,
+  EditorEventMap,
+  NexusPlugin,
+  ParserLike,
+  TocEntry,
+} from "./types";
 import { createWidgetExtension } from "./widget-extension";
 
 const FLOATBOAT_MARKDOWN_DEBUG_STORAGE_KEY = "floatboat:markdown-debug";
@@ -63,6 +73,30 @@ function createEmptyAst(): Root {
     type: "root",
     children: []
   };
+}
+
+/**
+ * 从剪贴板 / 拖拽数据里收集文件。优先用 `files`；当 `files` 为空时回退到 `items`，
+ * 因为截图、网页复制的图片往往以 `DataTransferItem`（kind === "file"）形式到达，
+ * 而非 `files` 列表——这正是 cmd+v 粘贴图片在多数平台的真实形态。
+ */
+function collectFilesFromDataTransfer(data: DataTransfer | null | undefined): File[] {
+  if (!data) return [];
+
+  const files: File[] = [];
+  if (data.files && data.files.length > 0) {
+    files.push(...Array.from(data.files));
+  }
+
+  if (files.length === 0 && data.items && data.items.length > 0) {
+    for (const item of Array.from(data.items)) {
+      if (item.kind !== "file") continue;
+      const file = item.getAsFile();
+      if (file) files.push(file);
+    }
+  }
+
+  return files;
 }
 
 function parseDocument(parser: ParserLike, markdown: string): Root {
@@ -184,6 +218,22 @@ export function createEditor(config: EditorConfig): EditorAPI {
   const slashCommands = plugins.flatMap((plugin) => plugin.slashCommands ?? []);
   const cmExtensions = plugins.flatMap((plugin) => plugin.cmExtensions ?? []);
   const widgetDefs = plugins.flatMap((plugin) => plugin.widgets ?? []);
+  // 命名命令（类 Obsidian addCommand）。同 id 以先注册者为准。
+  const commands = plugins.flatMap((plugin) => plugin.commands ?? []);
+  const commandById = new Map<string, EditorCommand>();
+  for (const command of commands) {
+    if (!commandById.has(command.id)) commandById.set(command.id, command);
+  }
+  // 插件 DOM 事件钩子。内置资源上传作为兜底，在所有钩子都未消费时才执行。
+  const pasteHandlers = plugins
+    .map((plugin) => plugin.handlers?.paste)
+    .filter((handler): handler is EditorEventHandler<ClipboardEvent> => Boolean(handler));
+  const dropHandlers = plugins
+    .map((plugin) => plugin.handlers?.drop)
+    .filter((handler): handler is EditorEventHandler<DragEvent> => Boolean(handler));
+  const keydownHandlers = plugins
+    .map((plugin) => plugin.handlers?.keydown)
+    .filter((handler): handler is EditorEventHandler<KeyboardEvent> => Boolean(handler));
 
   // The sync remark parser is only needed for the legacy WidgetDefinition
   // extension. Live preview, getAst(), table-of-contents, and normal change
@@ -206,6 +256,10 @@ export function createEditor(config: EditorConfig): EditorAPI {
   let parseTimer: ReturnType<typeof setTimeout> | undefined;
   let compositionFlushTimer: ReturnType<typeof setTimeout> | undefined;
   let pendingCompositionMarkdown: string | null = null;
+  // 组合输入（IME）状态与被推迟的文档回灌。组合输入进行中调用 setDocument 会被
+  // 推迟到 compositionend 再应用，避免整文档替换打断输入法、丢失合成中文字、视口跳顶。
+  let composing = false;
+  let pendingDocumentLoad: { next: string; silent: boolean } | null = null;
   // Initial AST: when a custom parser is provided, honour it (tests rely on
   // this — they install plugins that mutate the tree). Otherwise use the
   // Lezer string parser, which is dramatically faster than remark and
@@ -309,6 +363,87 @@ export function createEditor(config: EditorConfig): EditorAPI {
     }, COMPOSITION_FLUSH_DELAY_MS);
   }
 
+  // 整文档替换的实际执行体。setDocument（公开 API）在组合输入中会推迟调用本函数。
+  function performSetDocument(next: string, silent: boolean) {
+    const beforeSelection = view.state.selection.main;
+    debugNexus("setDocument", {
+      silent,
+      oldLength: view.state.doc.length,
+      nextLength: next.length,
+      beforeSelection: { anchor: beforeSelection.anchor, head: beforeSelection.head },
+    });
+
+    view.dispatch({
+      changes: {
+        from: 0,
+        to: view.state.doc.length,
+        insert: next
+      },
+      annotations: silent ? silentDocChange.of(true) : undefined,
+    });
+
+    // silent 模式下仍同步 currentAst，使 getAst() / getTableOfContents() 反映已载入文件。
+    if (silent) {
+      if (customParser) {
+        currentAst = parseDocument(customParser, next);
+      } else {
+        currentAst = transformAst(lezerAstFromAnywhere(viewRef, next));
+      }
+    }
+  }
+
+  // compositionend 时应用被推迟的文档回灌；整文档替换后排队中的组合输入变更已失效。
+  function applyPendingDocumentLoad(): boolean {
+    if (!pendingDocumentLoad) return false;
+    const { next, silent } = pendingDocumentLoad;
+    pendingDocumentLoad = null;
+    pendingCompositionMarkdown = null;
+    performSetDocument(next, silent);
+    return true;
+  }
+
+  function createEventContext(): EditorEventContext {
+    return {
+      editor: api,
+      insertMarkdown: (markdown: string) => {
+        if (destroyed) return;
+        view.dispatch(view.state.replaceSelection(markdown));
+      },
+      uploadAsset: (file: File) => api.uploadAsset(file),
+    };
+  }
+
+  // 依次执行插件事件钩子；任一返回 true 视为已消费，停止派发。
+  function runEventHandlers<E extends Event>(handlers: EditorEventHandler<E>[], event: E): boolean {
+    if (destroyed || handlers.length === 0) return false;
+    const ctx = createEventContext();
+    for (const handler of handlers) {
+      if (handler(event, ctx) === true) return true;
+    }
+    return false;
+  }
+
+  // 默认资源兜底：粘贴 / 拖拽进来的图片或文件依次走宿主上传管线并插入 markdown 引用。
+  function insertUploadedAssets(files: File[]): void {
+    const upload = config.onAssetUpload;
+    if (!upload || destroyed || files.length === 0) return;
+    void (async () => {
+      for (const file of files) {
+        let url: string | null = null;
+        try {
+          url = await upload(file);
+        } catch {
+          url = null;
+        }
+        if (!url || destroyed) continue;
+        const isImage = file.type.startsWith("image/");
+        const label = file.name || (isImage ? "image" : "file");
+        const markdown = isImage ? `![${label}](${url})` : `[${label}](${url})`;
+        view.dispatch(view.state.replaceSelection(markdown));
+      }
+    })();
+  }
+
   const themeExt = createThemeExtension(config.theme ?? lightTheme);
   const tabSizeExt = config.tabSize && config.tabSize !== 4
     ? EditorState.tabSize.of(config.tabSize)
@@ -333,6 +468,23 @@ export function createEditor(config: EditorConfig): EditorAPI {
         ]
       : [];
 
+  // 带 hotkey 的命名命令注册成 CodeMirror keymap；返回非 false 视为已消费。
+  const hotkeyCommands = commands.filter(
+    (command): command is EditorCommand & { hotkey: string } =>
+      typeof command.hotkey === "string" && command.hotkey.length > 0
+  );
+  const commandKeymapExtensions =
+    hotkeyCommands.length > 0
+      ? [
+          keymap.of(
+            hotkeyCommands.map((command) => ({
+              key: command.hotkey,
+              run: () => command.run(api) !== false
+            }))
+          )
+        ]
+      : [];
+
   const view = new EditorView({
     parent: config.container,
     state: EditorState.create({
@@ -348,6 +500,7 @@ export function createEditor(config: EditorConfig): EditorAPI {
             return false;
           },
           compositionstart(_event, view) {
+            composing = true;
             debugNexus("composition-start", {
               documentLength: view.state.doc.length,
               selection: {
@@ -358,10 +511,16 @@ export function createEditor(config: EditorConfig): EditorAPI {
             return false;
           },
           compositionend(_event, view) {
+            composing = false;
             debugNexus("composition-end", {
               documentLength: view.state.doc.length,
               hasPendingChange: pendingCompositionMarkdown !== null,
+              hasPendingDocumentLoad: pendingDocumentLoad !== null,
             });
+            // 组合输入结束：先应用被推迟的外部文档回灌（若有），否则正常 flush 本次输入。
+            if (applyPendingDocumentLoad()) {
+              return false;
+            }
             flushCompositionChange(view, "compositionend");
             return false;
           }
@@ -451,39 +610,40 @@ export function createEditor(config: EditorConfig): EditorAPI {
         markdownAutoPair(),
         dropCursor(),
         EditorView.domEventHandlers({
-          drop(event) {
+          paste(event) {
+            // 先派发插件 paste 钩子；任一消费则阻止默认行为。
+            if (runEventHandlers(pasteHandlers, event)) {
+              event.preventDefault();
+              return true;
+            }
+            // 默认兜底：剪贴板里有图片 / 文件时走资源上传；纯文本粘贴交回 CodeMirror。
             if (!config.onAssetUpload || destroyed) return false;
-            const files = event.dataTransfer?.files;
-            if (!files || files.length === 0) return false;
+            const files = collectFilesFromDataTransfer(event.clipboardData);
+            if (files.length === 0) return false;
 
             event.preventDefault();
-            for (const file of Array.from(files)) {
-              config.onAssetUpload(file).then((url) => {
-                if (url) {
-                  const isImage = file.type.startsWith("image/");
-                  const md = isImage ? `![${file.name}](${url})` : `[${file.name}](${url})`;
-                  view.dispatch(view.state.replaceSelection(md));
-                }
-              });
-            }
+            insertUploadedAssets(files);
             return true;
           },
-          paste(event) {
+          drop(event) {
+            if (runEventHandlers(dropHandlers, event)) {
+              event.preventDefault();
+              return true;
+            }
             if (!config.onAssetUpload || destroyed) return false;
-            const files = event.clipboardData?.files;
-            if (!files || files.length === 0) return false;
+            const files = collectFilesFromDataTransfer(event.dataTransfer);
+            if (files.length === 0) return false;
 
             event.preventDefault();
-            for (const file of Array.from(files)) {
-              config.onAssetUpload(file).then((url) => {
-                if (url) {
-                  const isImage = file.type.startsWith("image/");
-                  const md = isImage ? `![${file.name}](${url})` : `[${file.name}](${url})`;
-                  view.dispatch(view.state.replaceSelection(md));
-                }
-              });
-            }
+            insertUploadedAssets(files);
             return true;
+          },
+          keydown(event) {
+            if (runEventHandlers(keydownHandlers, event)) {
+              event.preventDefault();
+              return true;
+            }
+            return false;
           },
         }),
         ...createLivePreviewExtension(config.livePreview, {
@@ -496,6 +656,7 @@ export function createEditor(config: EditorConfig): EditorAPI {
         }),
         ...(widgetParser ? createWidgetExtension(widgetParser, widgetDefs) : []),
         ...shortcutExtensions,
+        ...commandKeymapExtensions,
         ...cmExtensions
       ]
     })
@@ -559,34 +720,19 @@ export function createEditor(config: EditorConfig): EditorAPI {
       }
 
       const silent = opts?.silent === true;
-      const beforeSelection = view.state.selection.main;
-      debugNexus("setDocument", {
-        silent,
-        oldLength: view.state.doc.length,
-        nextLength: next.length,
-        beforeSelection: { anchor: beforeSelection.anchor, head: beforeSelection.head },
-      });
 
-      view.dispatch({
-        changes: {
-          from: 0,
-          to: view.state.doc.length,
-          insert: next
-        },
-        annotations: silent ? silentDocChange.of(true) : undefined,
-      });
-
-      // In silent mode we still keep currentAst in sync so getAst() /
-      // getTableOfContents() reflect the loaded file. Default path is the
-      // Lezer adapter against the freshly dispatched state — synchronous and
-      // negligible cost. Custom-parser callers (tests) keep their semantics.
-      if (silent) {
-        if (customParser) {
-          currentAst = parseDocument(customParser, next);
-        } else {
-          currentAst = transformAst(lezerAstFromAnywhere(viewRef, next));
-        }
+      // 组合输入（IME）进行中：整文档替换会打断输入法、丢失合成中文字并把视口重置到顶部。
+      // 推迟到 compositionend 再应用，只保留最后一次请求。
+      if (composing || view.composing || view.compositionStarted) {
+        pendingDocumentLoad = { next, silent };
+        debugNexus("setDocument-deferred-composing", {
+          silent,
+          nextLength: next.length,
+        });
+        return;
       }
+
+      performSetDocument(next, silent);
     },
     replaceSelection(text) {
       if (destroyed) return;
@@ -624,6 +770,22 @@ export function createEditor(config: EditorConfig): EditorAPI {
       const shortcut = shortcuts.find((entry) => entry.key === key);
       return shortcut ? shortcut.run(api) : false;
     },
+    getCommands() {
+      return commands.slice();
+    },
+    runCommand(id) {
+      if (destroyed) {
+        return false;
+      }
+
+      const command = commandById.get(id);
+      if (!command) return false;
+      return command.run(api) !== false;
+    },
+    isComposing() {
+      if (destroyed) return false;
+      return composing || view.composing || view.compositionStarted;
+    },
     on(event, handler) {
       emitter.on(event, handler);
     },
@@ -634,6 +796,14 @@ export function createEditor(config: EditorConfig): EditorAPI {
       if (destroyed) return null;
       try {
         return view.coordsAtPos(pos);
+      } catch {
+        return null;
+      }
+    },
+    getPosAtDOM(node) {
+      if (destroyed) return null;
+      try {
+        return view.posAtDOM(node);
       } catch {
         return null;
       }
@@ -664,6 +834,8 @@ export function createEditor(config: EditorConfig): EditorAPI {
         compositionFlushTimer = undefined;
       }
       pendingCompositionMarkdown = null;
+      pendingDocumentLoad = null;
+      composing = false;
       emitter.clear();
       view.destroy();
     }

@@ -450,3 +450,249 @@ describe("createEditor", () => {
     editor.destroy();
   });
 });
+
+function captureViewPlugin(onView: (view: EditorView) => void) {
+  return ViewPlugin.fromClass(
+    class {
+      constructor(readonly view: EditorView) {
+        onView(view);
+      }
+    }
+  );
+}
+
+function makePasteEvent(clipboardData: Record<string, unknown>): Event {
+  const event = new Event("paste", { bubbles: true, cancelable: true });
+  // 兜底 getData，避免放行后 CodeMirror 内置 paste 处理器在桩上抛错。
+  const data = { getData: () => "", ...clipboardData };
+  Object.defineProperty(event, "clipboardData", { configurable: true, value: data });
+  return event;
+}
+
+const flushMicrotasks = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+describe("createEditor — composition-safe setDocument", () => {
+  it("reports composition state via isComposing()", () => {
+    const container = document.createElement("div");
+    let capturedView: EditorView | null = null;
+    const editor = createEditor({
+      container,
+      initialValue: "base",
+      plugins: [{ name: "capture", cmExtensions: [captureViewPlugin((view) => (capturedView = view))] }],
+    });
+    const view = requireEditorView(capturedView);
+
+    expect(editor.isComposing()).toBe(false);
+    view.contentDOM.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    expect(editor.isComposing()).toBe(true);
+    view.contentDOM.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    expect(editor.isComposing()).toBe(false);
+    editor.destroy();
+  });
+
+  it("defers setDocument while IME composition is active, then applies it on compositionend", () => {
+    const container = document.createElement("div");
+    let capturedView: EditorView | null = null;
+    const editor = createEditor({
+      container,
+      initialValue: "base",
+      plugins: [{ name: "capture", cmExtensions: [captureViewPlugin((view) => (capturedView = view))] }],
+    });
+    const view = requireEditorView(capturedView);
+
+    view.contentDOM.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    // 组合输入中宿主回灌文档：必须被推迟，不能整文档替换打断 IME。
+    editor.setDocument("external load", { silent: true });
+    expect(editor.getDocument()).toBe("base");
+
+    view.contentDOM.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    // 组合输入结束后才应用被推迟的回灌。
+    expect(editor.getDocument()).toBe("external load");
+    editor.destroy();
+  });
+
+  it("keeps the in-flight composition text when no external load is pending", async () => {
+    vi.useFakeTimers();
+    const container = document.createElement("div");
+    const docs: string[] = [];
+    let capturedView: EditorView | null = null;
+    const editor = createEditor({
+      container,
+      onChange(doc) {
+        docs.push(doc);
+      },
+      plugins: [{ name: "capture", cmExtensions: [captureViewPlugin((view) => (capturedView = view))] }],
+    });
+    const view = requireEditorView(capturedView);
+
+    view.contentDOM.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    view.dispatch({ changes: { from: 0, insert: "你好" }, userEvent: "input.type.compose" });
+    expect(editor.getDocument()).toBe("你好");
+    expect(docs).toEqual([]);
+
+    view.contentDOM.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(80);
+
+    expect(editor.getDocument()).toBe("你好");
+    expect(docs).toEqual(["你好"]);
+    editor.destroy();
+  });
+});
+
+describe("createEditor — command registry", () => {
+  it("aggregates named commands and runs them by id", () => {
+    const container = document.createElement("div");
+    const ran: string[] = [];
+    const editor = createEditor({
+      container,
+      plugins: [
+        {
+          name: "cmd",
+          commands: [
+            { id: "say-hi", label: "Say Hi", run: () => void ran.push("hi") },
+            { id: "stop", run: () => false },
+          ],
+        },
+      ],
+    });
+
+    expect(editor.getCommands().map((command) => command.id)).toEqual(["say-hi", "stop"]);
+    expect(editor.runCommand("say-hi")).toBe(true);
+    expect(ran).toEqual(["hi"]);
+    // run 返回 false 视为未消费。
+    expect(editor.runCommand("stop")).toBe(false);
+    expect(editor.runCommand("missing")).toBe(false);
+    editor.destroy();
+  });
+
+  it("binds command hotkeys into the keymap", () => {
+    const container = document.createElement("div");
+    const editor = createEditor({
+      container,
+      plugins: [
+        {
+          name: "cmd",
+          commands: [{ id: "insert-x", hotkey: "Ctrl-j", run: (api) => void api.setDocument("X") }],
+        },
+      ],
+    });
+
+    const content = container.querySelector("[contenteditable='true']");
+    content?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "j", ctrlKey: true, bubbles: true, cancelable: true })
+    );
+
+    expect(editor.getDocument()).toBe("X");
+    editor.destroy();
+  });
+});
+
+describe("createEditor — DOM event hook layer", () => {
+  it("lets plugin paste handlers consume the event before the default asset pipeline", () => {
+    const container = document.createElement("div");
+    const uploads: File[] = [];
+    const editor = createEditor({
+      container,
+      onAssetUpload: (file) => {
+        uploads.push(file);
+        return Promise.resolve("uploaded");
+      },
+      plugins: [
+        {
+          name: "paste-hook",
+          handlers: {
+            paste: (_event, ctx) => {
+              ctx.insertMarkdown("HOOK");
+              return true;
+            },
+          },
+        },
+      ],
+    });
+    const content = container.querySelector("[contenteditable='true']") as HTMLElement;
+
+    const file = new File(["img"], "x.png", { type: "image/png" });
+    const event = makePasteEvent({ files: [file], items: [] });
+    content.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(editor.getDocument()).toContain("HOOK");
+    // 钩子已消费，默认上传管线不应执行。
+    expect(uploads).toEqual([]);
+    editor.destroy();
+  });
+
+  it("uploads clipboard image items that arrive without a files list", async () => {
+    const container = document.createElement("div");
+    const uploads: File[] = [];
+    const editor = createEditor({
+      container,
+      onAssetUpload: (file) => {
+        uploads.push(file);
+        return Promise.resolve("assets/shot.png");
+      },
+    });
+    const content = container.querySelector("[contenteditable='true']") as HTMLElement;
+
+    const file = new File(["img"], "shot.png", { type: "image/png" });
+    const event = makePasteEvent({ files: [], items: [{ kind: "file", getAsFile: () => file }] });
+    content.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    await flushMicrotasks();
+
+    expect(uploads).toEqual([file]);
+    expect(editor.getDocument()).toContain("![shot.png](assets/shot.png)");
+    editor.destroy();
+  });
+
+  it("does not route plain-text paste through the asset pipeline", () => {
+    const container = document.createElement("div");
+    const uploads: File[] = [];
+    const editor = createEditor({
+      container,
+      onAssetUpload: (file) => {
+        uploads.push(file);
+        return Promise.resolve("uploaded");
+      },
+    });
+    const content = container.querySelector("[contenteditable='true']") as HTMLElement;
+
+    // 纯文本粘贴（无 files/items）交回 CodeMirror，绝不触发资源上传。
+    const event = makePasteEvent({ files: [], items: [], getData: () => "plain text" });
+    content.dispatchEvent(event);
+
+    expect(uploads).toEqual([]);
+    editor.destroy();
+  });
+
+  it("dispatches keydown to plugin handlers and stops default only when consumed", () => {
+    const container = document.createElement("div");
+    const keys: string[] = [];
+    const editor = createEditor({
+      container,
+      plugins: [
+        {
+          name: "keydown-hook",
+          handlers: {
+            keydown: (event) => {
+              keys.push(event.key);
+              return event.key === "F2";
+            },
+          },
+        },
+      ],
+    });
+    const content = container.querySelector("[contenteditable='true']") as HTMLElement;
+
+    const handled = new KeyboardEvent("keydown", { key: "F2", bubbles: true, cancelable: true });
+    content.dispatchEvent(handled);
+    expect(keys).toContain("F2");
+    expect(handled.defaultPrevented).toBe(true);
+
+    const passthrough = new KeyboardEvent("keydown", { key: "F3", bubbles: true, cancelable: true });
+    content.dispatchEvent(passthrough);
+    expect(passthrough.defaultPrevented).toBe(false);
+    editor.destroy();
+  });
+});

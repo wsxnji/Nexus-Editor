@@ -102,7 +102,11 @@ export interface EditorConfig {
   onChange?: (doc: string, ast: Root) => void;
   onFocus?: () => void;
   onBlur?: () => void;
-  onAssetUpload?: (file: File) => Promise<string>;
+  /**
+   * 资源上传钩子：粘贴 / 拖拽进来的图片或文件交给宿主落盘 / 上传，返回可供 markdown
+   * 引用的 URL（相对路径或远程地址）。返回 null 表示放弃，编辑器不会插入坏链接。
+   */
+  onAssetUpload?: (file: File) => Promise<string | null>;
 }
 
 export interface SlashMenuState {
@@ -145,6 +149,10 @@ export interface EditorAPI {
    * @param opts.silent  When true, skip the onChange pipeline. Use when
    *   loading a file from disk — avoids treating a file-open as a user
    *   edit (no redundant mdast parse / link-index rebuild).
+   *
+   * 组合输入（IME）进行中时，整文档替换会打断输入法、丢失正在合成的文字
+   * 并把视口重置到顶部。此时本次替换会延迟到 compositionend 再应用，只保留
+   * 最后一次请求。
    */
   setDocument(next: string, opts?: { silent?: boolean }): void;
   replaceSelection(text: string): void;
@@ -153,10 +161,25 @@ export interface EditorAPI {
   focus(): void;
   blur(): void;
   runShortcut(key: string): boolean;
+  /** 返回所有插件注册的命令（含内置）。 */
+  getCommands(): EditorCommand[];
+  /** 按 id 执行命令；找到并执行返回 true，否则 false。 */
+  runCommand(id: string): boolean;
+  /**
+   * 是否处于输入法组合输入（IME composition）中。宿主在回灌文档前应先查询，
+   * 避免在合成过程中调用 setDocument 打断输入。
+   */
+  isComposing(): boolean;
   destroy(): void;
   on<K extends keyof EditorEventMap>(event: K, handler: EditorEventMap[K]): void;
   off<K extends keyof EditorEventMap>(event: K, handler: EditorEventMap[K]): void;
   getCoordsAtPos(pos: number): { left: number; right: number; top: number; bottom: number } | null;
+  /**
+   * 返回某个 DOM 节点当前对应的文档偏移（基于 CodeMirror 的 DOM↔文档映射）。
+   * 用于会被复用、平移的 live-preview widget（如图片）在事件发生时解析自身实时位置，
+   * 而不是依赖渲染时捕获、可能因上方编辑而过期的固定 from/to。无法解析时返回 null。
+   */
+  getPosAtDOM(node: HTMLElement): number | null;
   getDocumentStats(): { characters: number; words: number; lines: number };
 }
 
@@ -224,10 +247,57 @@ export interface WidgetDefinition {
   ignoreEvents?: boolean;
 }
 
+/**
+ * 命名命令——类似 Obsidian 的 `addCommand`。比 {@link NexusPlugin.shortcuts}
+ * 更高层：带稳定 id 与可读 label，可由命令面板 / 菜单按 id 触发，并可选绑定快捷键。
+ */
+export interface EditorCommand {
+  /** 稳定唯一标识，用于 {@link EditorAPI.runCommand}。 */
+  id: string;
+  /** 可读名称，供命令面板 / 菜单展示。 */
+  label?: string;
+  /** 执行体。返回 false 表示未消费（宿主可继续派发默认行为）。 */
+  run: (editor: EditorAPI) => boolean | void;
+  /** 可选 CodeMirror 快捷键绑定，如 "Mod-b"、"Ctrl-k"。 */
+  hotkey?: string;
+}
+
+/**
+ * 事件钩子上下文：传给 paste / drop / keydown 处理器，提供编辑器句柄与常用动作，
+ * 不直接暴露 CodeMirror 内部对象，保持插件 API 稳定。
+ */
+export interface EditorEventContext {
+  editor: EditorAPI;
+  /** 在当前选区插入 markdown 文本（替换选区）。 */
+  insertMarkdown: (markdown: string) => void;
+  /** 走宿主配置的资源上传管线（{@link EditorConfig.onAssetUpload}）。 */
+  uploadAsset: (file: File) => Promise<string | null>;
+}
+
+/**
+ * 事件处理器：返回 `true` 表示已消费该事件——编辑器会阻止默认行为并停止把事件
+ * 继续派发给后续处理器（含内置默认逻辑）。返回 `false`/`undefined` 表示放行。
+ */
+export type EditorEventHandler<E extends Event> = (event: E, ctx: EditorEventContext) => boolean | void;
+
+/**
+ * 插件可注册的 DOM 事件钩子。内置的图片粘贴 / 拖拽资源上传会作为兜底，在所有
+ * 插件钩子都未消费时才执行，因此插件可覆盖默认行为。
+ */
+export interface EditorEventHandlers {
+  paste?: EditorEventHandler<ClipboardEvent>;
+  drop?: EditorEventHandler<DragEvent>;
+  keydown?: EditorEventHandler<KeyboardEvent>;
+}
+
 export interface NexusPlugin {
   name: string;
   shortcuts?: Array<{ key: string; run: (editor: EditorAPI) => boolean }>;
   slashCommands?: SlashCommandDef[];
+  /** 命名命令，见 {@link EditorCommand}。带 hotkey 的会自动注册快捷键。 */
+  commands?: EditorCommand[];
+  /** DOM 事件钩子，见 {@link EditorEventHandlers}。 */
+  handlers?: EditorEventHandlers;
   remarkPlugins?: Array<Plugin<[], Root, Root>>;
   cmExtensions?: Extension[];
   widgets?: WidgetDefinition[];

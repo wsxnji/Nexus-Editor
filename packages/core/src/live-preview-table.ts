@@ -9,6 +9,36 @@ export function isTableEditing(): boolean {
   return tableEditingCount > 0;
 }
 
+// 表格方向键导航的调试日志，仅在显式开启 floatboat:markdown-debug 标记后输出。
+// 用于在真实环境里定位"光标没跳格 / 飞到第一行"等时序问题。
+function tableNavDebug(message: string, details?: Record<string, unknown>): void {
+  try {
+    const debugGlobal = globalThis as {
+      __FLOATBOAT_MARKDOWN_DEBUG__?: boolean;
+      localStorage?: { getItem(key: string): string | null };
+    };
+    const enabled =
+      debugGlobal.__FLOATBOAT_MARKDOWN_DEBUG__ === true ||
+      debugGlobal.localStorage?.getItem("floatboat:markdown-debug") === "1";
+    if (!enabled) return;
+    // eslint-disable-next-line no-console
+    console.debug(`[nexus-table-nav] ${message}`, details ?? {});
+  } catch {
+    /* noop */
+  }
+}
+
+function describeActiveCell(): string {
+  try {
+    const active = document.activeElement as HTMLElement | null;
+    if (!active) return "<none>";
+    const cls = active.className || active.tagName;
+    return `${cls}:"${(active.textContent ?? "").slice(0, 12)}"`;
+  } catch {
+    return "<err>";
+  }
+}
+
 const SEPARATOR_RE = /^\|?\s*[-:]+\s*(\|\s*[-:]+\s*)*\|?\s*$/;
 
 // Session-scoped store of user-customised column widths. Keyed by the
@@ -967,6 +997,109 @@ export class EditableTableWidget extends WidgetType {
     }
     table.appendChild(gripRow);
 
+    // ── 单元格方向键导航（表格内像电子表格一样移动）──
+    // 单元格各自 contentEditable，focus 某个单元格即触发其 focus 处理器进入编辑态，
+    // 所以导航 = focus 目标单元格 + 摆放光标。↑↓ 同列换行；←→ 仅在文本边界跳列，
+    // 否则交回浏览器在单元格文本内移动光标。
+    //
+    // 导航中标志位：方向键切换单元格时，旧单元格会 blur，其 blur 回调里有一个
+    // `v.dispatch({selection})` 会把 CM 文档选区重新派发——这会把焦点/可见光标抢回
+    // 编辑器文档（停在文档选区处，常是第 0 行），导致"光标没跳到目标单元格、反而飞到第一行"。
+    // 切换期间置位，让旧单元格 blur 跳过这个会抢焦点的派发；新单元格 focus 已接管编辑态。
+    let navigatingBetweenCells = false;
+    function tableDataRows(): HTMLElement[] {
+      return Array.from(table.querySelectorAll<HTMLElement>("tr")).filter((row) => row.querySelector(".nexus-cell"));
+    }
+    function cellAt(rowIndex: number, colIndex: number): HTMLElement | null {
+      if (rowIndex < 0 || colIndex < 0) return null;
+      const row = tableDataRows()[rowIndex];
+      if (!row) return null;
+      return row.querySelectorAll<HTMLElement>(".nexus-cell")[colIndex] ?? null;
+    }
+    function caretOffsetInCell(cell: HTMLElement): number | null {
+      const selection = cell.ownerDocument.getSelection();
+      if (!selection || selection.rangeCount === 0) return null;
+      const range = selection.getRangeAt(0);
+      if (!cell.contains(range.startContainer)) return null;
+      const pre = range.cloneRange();
+      pre.selectNodeContents(cell);
+      pre.setEnd(range.startContainer, range.startOffset);
+      return pre.toString().length;
+    }
+    function focusCellForNavigation(cell: HTMLElement, caret: "start" | "end"): void {
+      // 进入"导航中"：旧单元格 blur 时跳过会抢焦点的 selection 派发。
+      // blur 在 focus() 内同步触发并 queueMicrotask，故其微任务排在本函数随后 queue 的复位之前。
+      navigatingBetweenCells = true;
+      // 单元格默认 contentEditable=false（不可聚焦），必须先置为 true 再 focus，
+      // focus 处理器随后进入 raw 编辑态。否则 focus() 在不可聚焦元素上是 no-op。
+      if (cell.contentEditable !== "true") {
+        cell.contentEditable = "true";
+      }
+      cell.focus({ preventScroll: false });
+      tableNavDebug("focusCellForNavigation", {
+        caret,
+        target: (cell.dataset.source ?? cell.textContent ?? "").slice(0, 12),
+        activeAfterFocus: describeActiveCell(),
+      });
+      queueMicrotask(() => {
+        navigatingBetweenCells = false;
+      });
+      const place = (): void => {
+        if (cell.contentEditable !== "true") return;
+        const length = (cell.dataset.source ?? cell.textContent ?? "").length;
+        placeRawSourceCaret(cell, caret === "end" ? length : 0);
+      };
+      place();
+      // 与单元格点击激活一致：focus/重渲染稳定后再摆一次光标，避免落点丢失。
+      window.setTimeout(place, 0);
+      // 稍后回看焦点是否仍在目标单元格（若被抢走，说明仍有 dispatch/blur 干扰）。
+      window.setTimeout(() => tableNavDebug("focusCellForNavigation:settled", { active: describeActiveCell() }), 60);
+    }
+    function navigateFromCell(key: string, cell: HTMLElement, rowIndex: number, colIndex: number): boolean {
+      const offset = caretOffsetInCell(cell);
+      const length = (cell.dataset.source ?? cell.textContent ?? "").length;
+      const dataRowCount = tableDataRows().length;
+      tableNavDebug("navigateFromCell", { key, offset, length, rowIndex, colIndex, colCount, dataRowCount });
+
+      if (key === "ArrowUp") {
+        const target = cellAt(rowIndex - 1, colIndex);
+        tableNavDebug("ArrowUp target", { found: Boolean(target) });
+        if (!target) return false;
+        focusCellForNavigation(target, "end");
+        return true;
+      }
+      if (key === "ArrowDown") {
+        const target = cellAt(rowIndex + 1, colIndex);
+        tableNavDebug("ArrowDown target", { found: Boolean(target) });
+        if (!target) return false;
+        focusCellForNavigation(target, "end");
+        return true;
+      }
+      if (key === "ArrowLeft") {
+        if (offset === null || offset > 0) {
+          tableNavDebug("ArrowLeft passthrough (caret not at start)", { offset });
+          return false; // 文本内左移
+        }
+        const target = cellAt(rowIndex, colIndex - 1) ?? cellAt(rowIndex - 1, colCount - 1);
+        tableNavDebug("ArrowLeft target", { found: Boolean(target) });
+        if (!target) return false;
+        focusCellForNavigation(target, "end");
+        return true;
+      }
+      if (key === "ArrowRight") {
+        if (offset === null || offset < length) {
+          tableNavDebug("ArrowRight passthrough (caret not at end)", { offset, length });
+          return false; // 文本内右移
+        }
+        const target = cellAt(rowIndex, colIndex + 1) ?? cellAt(rowIndex + 1, 0);
+        tableNavDebug("ArrowRight target", { found: Boolean(target) });
+        if (!target) return false;
+        focusCellForNavigation(target, "start");
+        return true;
+      }
+      return false;
+    }
+
     // ── Data rows ──
     let rowIdx = 0;
     for (const astRow of rows) {
@@ -1220,9 +1353,16 @@ export class EditableTableWidget extends WidgetType {
           // with the up-to-date AST. `queueMicrotask` lets the blur
           // settle before we re-enter CM6.
           queueMicrotask(() => {
+            // 方向键在单元格间导航时，跳过这个 selection 派发：它会把焦点/光标抢回
+            // CM 文档选区（常是第 0 行），让光标"飞到第一行"而非落在目标单元格。
+            if (navigatingBetweenCells) {
+              tableNavDebug("blur-dispatch:skipped (navigating)");
+              return;
+            }
             const v = self.viewRef.current;
             if (!v) return;
             const sel = v.state.selection.main;
+            tableNavDebug("blur-dispatch:run", { anchor: sel.anchor, active: describeActiveCell() });
             try {
               v.dispatch({ selection: { anchor: sel.anchor, head: sel.head } });
             } catch {
@@ -1255,11 +1395,20 @@ export class EditableTableWidget extends WidgetType {
         td.addEventListener("keydown", (e) => {
           if (e.key === "Tab") {
             e.preventDefault();
-            const all = table.querySelectorAll(".nexus-cell");
+            const all = table.querySelectorAll<HTMLElement>(".nexus-cell");
             const idx = Array.from(all).indexOf(td);
             const next = e.shiftKey ? idx - 1 : idx + 1;
-            if (next >= 0 && next < all.length) (all[next] as HTMLElement).focus({ preventScroll: true });
+            const target = next >= 0 && next < all.length ? all[next] : null;
+            if (target) focusCellForNavigation(target, e.shiftKey ? "end" : "start");
             return;
+          }
+
+          // 方向键在单元格之间移动（电子表格式）；边界外不消费，交回默认。
+          if (e.key === "ArrowUp" || e.key === "ArrowDown" || e.key === "ArrowLeft" || e.key === "ArrowRight") {
+            if (navigateFromCell(e.key, td, cellRow, cellCol)) {
+              e.preventDefault();
+              return;
+            }
           }
 
           // Forward editor-level shortcuts to CM6's keymap. The cell is

@@ -23,7 +23,11 @@ export {
 export type {
   CodeHighlightToken,
   EditorAPI,
+  EditorCommand,
   EditorConfig,
+  EditorEventContext,
+  EditorEventHandler,
+  EditorEventHandlers,
   EditorEventMap,
   LivePreviewConfig,
   LivePreviewLabels,
