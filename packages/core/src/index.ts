@@ -37,6 +37,7 @@ export type {
   EditorEventHandler,
   EditorEventHandlers,
   EditorEventMap,
+  EditorSelectionRange,
   LivePreviewConfig,
   LivePreviewLabels,
   LivePreviewNode,
@@ -50,6 +51,7 @@ export type {
   SelectionState,
   SlashCommandDef,
   SlashMenuState,
+  SetDocumentOptions,
   TocEntry,
   WidgetDefinition,
   WidgetRenderContext
