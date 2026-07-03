@@ -1,4 +1,4 @@
-import { scanWikiLinks, type WikiLinkMatch } from "@floatboat/nexus-core";
+import { scanWikiLinks, scanBlockIds, resolveBlockContent, type WikiLinkMatch, type BlockRegistry } from "@floatboat/nexus-core";
 import { normalizeSlashes, joinPath } from "./path-utils";
 
 /** Prefer requestIdleCallback for yielding; fall back to a macrotask otherwise. */
@@ -30,6 +30,7 @@ interface IndexSnapshot {
   backward: Map<string, BacklinkHit[]>;
   contents: Map<string, string>;
   byBasename: Map<string, Set<string>>;
+  blockRegistries: Map<string, BlockRegistry>;
 }
 
 interface RebuildAsyncOptions {
@@ -165,6 +166,8 @@ export class LinkIndex {
   /** Memoized unlinked-mentions result per target; invalidated on any
    * contents/forward mutation. */
   private unlinkedCache = new Map<string, BacklinkHit[]>();
+  /** Per-file block registries (heading slugs + explicit ^{id} anchors). */
+  private blockRegistries = new Map<string, BlockRegistry>();
 
   private listeners = new Set<LinkIndexListener>();
 
@@ -221,6 +224,7 @@ export class LinkIndex {
   updateFile(path: string, content: string): void {
     this.removeFromBasenames(path);
     this.indexFile(path, content);
+    this.blockRegistries.delete(normalizeSlashes(path));
     this.invalidateUnlinkedCache();
     // Incremental reverse-index maintenance — only rewrites backward edges
     // whose `sourcePath` is this file. O(|edges of this file|) instead of
@@ -236,6 +240,7 @@ export class LinkIndex {
     const norm = normalizeSlashes(path);
     this.forward.delete(norm);
     this.contents.delete(norm);
+    this.blockRegistries.delete(norm);
     this.invalidateUnlinkedCache();
     // Only purge edges whose sourcePath is this file.
     this.removeBackwardEdgesFrom(norm);
@@ -323,6 +328,37 @@ export class LinkIndex {
     return [...this.contents.keys()];
   }
 
+  /** Raw content for an absolute file path, or null if unknown. */
+  getFileContent(path: string): string | null {
+    return this.contents.get(normalizeSlashes(path)) ?? null;
+  }
+
+  /** Block registry for a file (lazy-built and cached on demand). */
+  getBlockRegistry(path: string): BlockRegistry {
+    const norm = normalizeSlashes(path);
+    const cached = this.blockRegistries.get(norm);
+    if (cached) return cached;
+    const content = this.contents.get(norm);
+    if (!content) return new Map();
+    const registry = scanBlockIds(content);
+    this.blockRegistries.set(norm, registry);
+    return registry;
+  }
+
+  /**
+   * Resolve a block's Markdown content given an absolute file path and a block
+   * ID. Returns null when the file or block is not found.
+   */
+  resolveBlockContent(path: string, blockId: string): string | null {
+    if (!blockId) return null;
+    const registry = this.getBlockRegistry(path);
+    const entry = registry.get(blockId);
+    if (!entry) return null;
+    const content = this.contents.get(normalizeSlashes(path));
+    if (!content) return null;
+    return resolveBlockContent(entry, content);
+  }
+
   /**
    * Resolve a wiki-link name from a source file to an absolute target path.
    * Order: exact match → relative to source dir → same-dir basename → global
@@ -398,6 +434,7 @@ export class LinkIndex {
       backward: new Map(),
       contents: new Map(),
       byBasename: new Map(),
+      blockRegistries: new Map(),
     };
   }
 
@@ -407,6 +444,7 @@ export class LinkIndex {
       backward: this.backward,
       contents: this.contents,
       byBasename: this.byBasename,
+      blockRegistries: this.blockRegistries,
     };
   }
 
@@ -415,6 +453,7 @@ export class LinkIndex {
     this.backward = next.backward;
     this.contents = next.contents;
     this.byBasename = next.byBasename;
+    this.blockRegistries = next.blockRegistries;
     this.invalidateUnlinkedCache();
   }
 
@@ -465,6 +504,9 @@ export class LinkIndex {
       snapshot.byBasename.set(bn, bucket);
     }
     bucket.add(path);
+    // Build block registry lazily on first access via getBlockRegistry,
+    // but pre-seed during rebuild so resolveBlockContent is O(1).
+    snapshot.blockRegistries.set(path, scanBlockIds(content));
   }
 
   private removeFromBasenames(rawPath: string): void {

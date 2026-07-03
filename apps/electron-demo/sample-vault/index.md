@@ -32,6 +32,10 @@ show a long list.
 
 - [[slash-demo]] — type `/` anywhere to open the floating command menu
 
+## Block references & transclusion
+
+- [[transclusion-demo]] — block reference and transclusion (![[ ]]) demos
+
 ## Edge cases
 
 - [[ghost-demo]] — try clicking the red dashed ghost link inside

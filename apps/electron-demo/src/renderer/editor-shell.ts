@@ -1,6 +1,8 @@
 import {
   createEditor,
   createWikilinksPlugin,
+  clearTransclusionCache,
+  invalidateFileCache,
   type EditorAPI,
   type LivePreviewRenderContext,
 } from "@floatboat/nexus-core";
@@ -76,6 +78,10 @@ export interface EditorShellOptions {
   resolveWikilink?(name: string): string | null;
   /** Returns autocomplete candidates for the query after `[[`. */
   suggestWikilinks?(query: string): string[];
+  /** Resolves `![[file#block-id]]` transclusion content to rendered Markdown. */
+  resolveTransclusion?: (file: string, blockId: string | undefined) => string | null;
+  /** Called when a block-reference link `[[file#block-id]]` is clicked. */
+  onTransclusionNavigate?: (file: string, blockId?: string) => void;
 }
 
 export interface EditorShell {
@@ -99,6 +105,8 @@ export function createEditorShell(options: EditorShellOptions): EditorShell {
     onWikilinkNavigate,
     resolveWikilink,
     suggestWikilinks,
+    resolveTransclusion,
+    onTransclusionNavigate,
   } = options;
 
   // Forward ref so the image renderer (built BEFORE createEditor returns)
@@ -318,6 +326,12 @@ export function createEditorShell(options: EditorShellOptions): EditorShell {
     tabSize: settings.tabSize,
     direction: settings.direction,
     indentGuides: settings.indentGuides,
+    transclusion: resolveTransclusion || onTransclusionNavigate
+      ? {
+          resolve: resolveTransclusion,
+          onNavigate: onTransclusionNavigate,
+        }
+      : undefined,
     onChange(doc) {
       state.content = doc;
       state.dirty = true;
@@ -325,6 +339,11 @@ export function createEditorShell(options: EditorShellOptions): EditorShell {
       // reacts immediately when the user types `[[...]]`.
       if (state.linkIndex && state.activeFile) {
         state.linkIndex.updateFile(state.activeFile, doc);
+      }
+      // Invalidate transclusion cache for the current file so embedded
+      // blocks from this file re-resolve after edits.
+      if (state.activeFile) {
+        invalidateFileCache(state.activeFile);
       }
       onStateChange();
     },

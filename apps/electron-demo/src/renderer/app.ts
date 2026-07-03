@@ -6,6 +6,7 @@ import { createSearchBar, type SearchBar } from "./search-bar";
 import { createVaultPanel, type VaultPanel } from "./vault-panel";
 import { LinkIndex, parseAnchor, findAnchorPosition } from "./link-index";
 import { createBacklinksPanel, type BacklinksPanel } from "./backlinks-panel";
+import { clearTransclusionCache, scanBlockIds } from "@floatboat/nexus-core";
 import { perfStart, perfEnd, installLongTaskWatch } from "./perf";
 
 installLongTaskWatch(50);
@@ -267,6 +268,7 @@ async function seedLinkIndex(): Promise<void> {
   } catch (err) {
     console.warn("seedLinkIndex failed:", err);
   }
+  clearTransclusionCache();
   perfEnd(total);
 }
 
@@ -324,6 +326,23 @@ async function handleWikilinkNavigate(target: string, opts: { unresolved: boolea
   }
 }
 
+async function handleTransclusionNavigate(file: string, blockId?: string): Promise<void> {
+  const resolved = linkIndex.resolve(file, state.activeFile);
+  if (!resolved) return;
+
+  if (resolved !== state.activeFile) {
+    await handleVaultFileOpen(resolved);
+  }
+  if (blockId) {
+    const registry = linkIndex.getBlockRegistry(resolved);
+    const entry = registry.get(blockId);
+    if (entry) {
+      shell.editor.setSelection(entry.contentFrom);
+      shell.editor.focus();
+    }
+  }
+}
+
 async function tryRestoreLastVault(): Promise<void> {
   try {
     const last = await window.nexusDemo.vault.getLast();
@@ -374,6 +393,15 @@ function boot(): void {
     onWikilinkNavigate: (target, opts) => {
       void handleWikilinkNavigate(target, opts);
     },
+    resolveTransclusion: (file, blockId) => {
+      const resolved = linkIndex.resolve(file, state.activeFile);
+      if (!resolved) return null;
+      if (!blockId) return linkIndex.getFileContent(resolved);
+      return linkIndex.resolveBlockContent(resolved, blockId);
+    },
+    onTransclusionNavigate: (file, blockId) => {
+      void handleTransclusionNavigate(file, blockId);
+    },
   });
 
   vault = createVaultPanel({
@@ -412,6 +440,7 @@ function boot(): void {
 
   // External file changes → re-seed the index (cheap for typical vaults).
   window.nexusDemo.vault.onChanged(() => {
+    clearTransclusionCache();
     void seedLinkIndex();
   });
 

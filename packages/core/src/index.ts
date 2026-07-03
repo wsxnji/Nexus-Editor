@@ -24,10 +24,28 @@ export {
   scanWikiLinks,
   createWikilinksExtension,
   createWikilinksPlugin,
+  scanTransclusions,
+  scanBlockRefLinks,
+  splitBlockRef,
   type WikiLinkMatch,
   type WikilinksOptions,
   type WikiLinkNavigateOptions,
 } from "./wikilinks";
+export {
+  scanBlockIds,
+  resolveBlockContent,
+  headingSlug,
+  parseBlockAnnotation,
+  type BlockEntry,
+  type BlockRegistry,
+  type ResolvedBlock,
+} from "./block-id";
+export {
+  TransclusionWidget,
+  clearTransclusionCache,
+  invalidateFileCache,
+  resolveContent,
+} from "./transclusion-widget";
 export type {
   CodeHighlightToken,
   EditorAPI,
@@ -55,4 +73,9 @@ export type {
   TocEntry,
   WidgetDefinition,
   WidgetRenderContext
+} from "./types";
+export type {
+  TransclusionMatch,
+  TransclusionResolver,
+  TransclusionConfig,
 } from "./types";

@@ -3,6 +3,8 @@ import type { Content, Parent, Root } from "mdast";
 
 import type { LivePreviewNode } from "./types";
 import { scanWikiLinks } from "./wikilinks";
+import { scanTransclusions, scanBlockRefLinks } from "./wikilinks";
+import type { TransclusionMatch } from "./types";
 
 export interface LivePreviewRange {
   from: number;
@@ -160,12 +162,25 @@ export function collectLivePreviewRanges(
   ast: Root,
   doc: string,
   selection: readonly SelectionRange[]
-): LivePreviewRange[] {
+): { ranges: LivePreviewRange[]; transclusions: TransclusionMatch[]; blockRefs: TransclusionMatch[] } {
   const ranges: LivePreviewRange[] = [];
-  const wikiLinkSpans = scanWikiLinks(doc).map((link) => [link.from, link.to] as [number, number]);
 
-  visit(ast, doc, selection, ranges, wikiLinkSpans);
+  // Collect spans that should NOT be further decorated by mdast walkers:
+  // wikilinks AND transclusions both create their own decorations.
+  const wikiLinkSpans = scanWikiLinks(doc).map((link) => [link.from, link.to] as [number, number]);
+  const transclusionSpans = scanTransclusions(doc).map((tm) => [tm.from, tm.to] as [number, number]);
+  const allSkipSpans = [...wikiLinkSpans, ...transclusionSpans];
+
+  visit(ast, doc, selection, ranges, allSkipSpans);
   ranges.push(...collectImageRanges(doc, selection));
 
-  return ranges.sort((left, right) => left.from - right.from);
+  // Scan for transclusion `![[file#block-id]]` and block-reference links.
+  const transclusions = scanTransclusions(doc);
+  const blockRefs = scanBlockRefLinks(doc);
+
+  return {
+    ranges: ranges.sort((left, right) => left.from - right.from),
+    transclusions,
+    blockRefs,
+  };
 }

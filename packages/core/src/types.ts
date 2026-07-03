@@ -113,11 +113,11 @@ export interface EditorConfig {
   onChange?: (doc: string, ast: Root) => void;
   onFocus?: () => void;
   onBlur?: () => void;
-  /**
-   * 资源上传钩子：粘贴 / 拖拽进来的图片或文件交给宿主落盘 / 上传，返回可供 markdown
-   * 引用的 URL（相对路径或远程地址）。返回 null 表示放弃，编辑器不会插入坏链接。
-   */
+  /** 资源上传钩子：粘贴 / 拖拽进来的图片或文件交给宿主落盘 / 上传，返回可供 markdown
+   * 引用的 URL（相对路径或远程地址）。返回 null 表示放弃，编辑器不会插入坏链接。 */
   onAssetUpload?: (file: File) => Promise<string | null>;
+  /** 块引用与内容嵌入配置（![[file#block-id]] 语法）。 */
+  transclusion?: TransclusionConfig;
 }
 
 export interface SlashMenuState {
@@ -395,4 +395,59 @@ export interface NexusPlugin {
   remarkPlugins?: Array<Plugin<[], Root, Root>>;
   cmExtensions?: Extension[];
   widgets?: WidgetDefinition[];
+}
+
+// ── Block References & Transclusion ─────────────────────────────────────────
+
+/**
+ * A parsed block-reference or transclusion match from the document.
+ *
+ *   [[Data#schema]]       → isTransclusion=false, file="Data", blockId="schema"
+ *   [[Data#schema|alias]] → isTransclusion=false, file="Data", blockId="schema", alias="alias"
+ *   ![[Data#schema]]      → isTransclusion=true,  file="Data", blockId="schema"
+ *   ![[Data|alias]]       → isTransclusion=true,  file="Data", blockId=undefined, alias="alias"
+ */
+export interface TransclusionMatch {
+  /** Absolute offset of the opening `![[` or `[[`. */
+  from: number;
+  /** Absolute offset after the closing `]]`. */
+  to: number;
+  /** Whether the leading `!` is present (embed, not just link). */
+  isTransclusion: boolean;
+  /** The file/target name (everything before `#` or `|` or `]]`). */
+  file: string;
+  /** Block identifier after `#` in the target; undefined for bare file links. */
+  blockId?: string;
+  /** Alias text when `|alias` is present. */
+  alias?: string;
+  /** The display text: alias when present, otherwise a compact `file#blockId`. */
+  display: string;
+}
+
+/**
+ * Host-provided resolver for transclusion content.
+ *
+ * When the editor encounters `![[file#block-id]]`, it calls this function to
+ * fetch the resolved Markdown content. Return `null` or `undefined` to show
+ * an "unresolved" state in the transclusion widget.
+ */
+export type TransclusionResolver = (
+  file: string,
+  blockId: string | undefined,
+  /** The current document source (for recursive-cycle detection). */
+  sourcePath?: string,
+) => string | null | undefined | Promise<string | null | undefined>;
+
+/** Configuration for block-transclusion behaviour. */
+export interface TransclusionConfig {
+  /**
+   * Host callback to resolve transclusion content. Without this the editor
+   * treats all `![[ ]]` links as unresolved (shows a placeholder).
+   */
+  resolve?: TransclusionResolver;
+  /**
+   * Callback when a block link (`[[file#id]]`) is clicked. The host decides
+   * what "navigate" means (open file, scroll to block, etc.).
+   */
+  onNavigate?: (file: string, blockId?: string) => void;
 }

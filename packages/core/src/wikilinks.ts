@@ -7,7 +7,7 @@ import {
 import { StateEffect, StateField, type Extension, type Range, type Transaction } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView } from "@codemirror/view";
 
-import type { NexusPlugin } from "./types";
+import type { NexusPlugin, TransclusionMatch } from "./types";
 
 const COMPOSITION_REDECORATE_DELAY_MS = 60;
 
@@ -68,8 +68,8 @@ export interface WikilinksOptions {
 }
 
 // Must disallow: nested `[`/`]`, pipes in target, newlines.
-// Leading `(?<!\\)` skips escaped `\[[`.
-const WIKILINK_RE = /(?<!\\)\[\[([^\[\]\n|]+?)(?:\|([^\[\]\n]+?))?\]\]/g;
+// Leading `(?<![!\\])` skips escaped `\[[` and transclusion `![[`.
+const WIKILINK_RE = /(?<![!\\])\[\[([^\[\]\n|]+?)(?:\|([^\[\]\n]+?))?\]\]/g;
 
 /**
  * Scan a document string for all wiki links. Pure, side-effect-free.
@@ -106,6 +106,92 @@ export function scanWikiLinks(doc: string): WikiLinkMatch[] {
     }
 
     out.push({ from, to, target, alias, display, displayFrom, displayTo });
+  }
+  return out;
+}
+
+// ── Transclusion: ![[file#block-id]] scanning ─────────────────────────────
+
+/**
+ * Regex matching transclusion syntax: `![[file#block-id|alias]]` or
+ * `![[file#block-id]]` or `![[file|alias]]`. The `!` prefix distinguishes
+ * these from plain wiki links.
+ *
+ * The target portion allows `#` (block separator) — split downstream.
+ */
+const TRANSCLUSION_RE = /(?<!\\)!\[\[([^\[\]\n]+?)(?:\|([^\[\]\n]+?))?\]\]/g;
+
+/**
+ * Like TRANSCLUSION_RE but without the leading `!` — captures block
+ * references that navigate rather than embed: `[[file#block-id]]`.
+ */
+const BLOCKREF_RE = /(?<!\\)\[\[([^\[\]\n]+?)(?:\|([^\[\]\n]+?))?\]\]/g;
+
+/**
+ * Split a wikilink target into file name and optional block ID.
+ *
+ *   "Data"              → { file: "Data", blockId: undefined }
+ *   "Data#schema"       → { file: "Data", blockId: "schema" }
+ *   "Data#heading-text" → { file: "Data", blockId: "heading-text" }
+ *   "#block-only"       → { file: "", blockId: "block-only" }
+ */
+export function splitBlockRef(rawTarget: string): { file: string; blockId?: string } {
+  const hashIdx = rawTarget.indexOf("#");
+  if (hashIdx < 0) return { file: rawTarget.trim() };
+  return {
+    file: rawTarget.slice(0, hashIdx).trim(),
+    blockId: rawTarget.slice(hashIdx + 1).trim() || undefined,
+  };
+}
+
+/**
+ * Scan a document string for all transclusion `![[ ]]` matches.
+ * Pure, side-effect-free. Order: ascending `from`.
+ */
+export function scanTransclusions(doc: string): TransclusionMatch[] {
+  const out: TransclusionMatch[] = [];
+  TRANSCLUSION_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = TRANSCLUSION_RE.exec(doc)) !== null) {
+    const from = match.index;
+    const source = match[0];
+    const to = from + source.length;
+    const rawTarget = match[1].trim();
+    const rawAlias = match[2]?.trim();
+    if (!rawTarget) continue;
+
+    const { file, blockId } = splitBlockRef(rawTarget);
+    const alias = rawAlias && rawAlias.length > 0 ? rawAlias : undefined;
+    const display = alias ?? (blockId ? `${file}#${blockId}` : file);
+
+    out.push({ from, to, isTransclusion: true, file, blockId, alias, display });
+  }
+  return out;
+}
+
+/**
+ * Scan for block-reference `[[file#block-id]]` links (no `!` prefix).
+ * These navigate on click rather than embedding.
+ */
+export function scanBlockRefLinks(doc: string): TransclusionMatch[] {
+  const out: TransclusionMatch[] = [];
+  BLOCKREF_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = BLOCKREF_RE.exec(doc)) !== null) {
+    const from = match.index;
+    const source = match[0];
+    const to = from + source.length;
+    const rawTarget = match[1].trim();
+    const rawAlias = match[2]?.trim();
+    if (!rawTarget) continue;
+
+    const { file, blockId } = splitBlockRef(rawTarget);
+    if (!blockId) continue; // plain [[file]] — those are handled by scanWikiLinks
+
+    const alias = rawAlias && rawAlias.length > 0 ? rawAlias : undefined;
+    const display = alias ?? `${file}#${blockId}`;
+
+    out.push({ from, to, isTransclusion: false, file, blockId, alias, display });
   }
   return out;
 }

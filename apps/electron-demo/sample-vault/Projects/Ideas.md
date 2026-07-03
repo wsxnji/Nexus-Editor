@@ -11,5 +11,7 @@ A parking lot for features we might add to [[Projects/Nexus-Editor|the editor]].
 
 ## Long term
 
-- Block references `[[Projects/Nexus-Editor^some-block]]` (v2)
-- Heading anchors `[[Projects/Nexus-Editor#Context]]` (v2)
+- Block references `[[Projects/Nexus-Editor#some-block]]` — now implemented! See [[transclusion-demo]].
+- Heading anchors `[[Projects/Nexus-Editor#Context]]` — now implemented! Uses heading slugs.
+- ~~Block references `[[Projects/Nexus-Editor^some-block]]`~~ — replaced with `#` syntax; all block IDs (heading slugs + explicit `^{id}`) use `#`.
+- ~~Heading anchors `[[Projects/Nexus-Editor#Context]]`~~ — done.

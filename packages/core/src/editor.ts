@@ -700,7 +700,7 @@ export function createEditor(config: EditorConfig): EditorAPI {
           deleteRow: locale.deleteRow,
           insertColumnAfter: locale.insertColumnAfter,
           insertRowBelow: locale.insertRowBelow,
-        }),
+        }, config.transclusion),
         ...(widgetParser ? createWidgetExtension(widgetParser, widgetDefs) : []),
         ...shortcutExtensions,
         ...commandKeymapExtensions,

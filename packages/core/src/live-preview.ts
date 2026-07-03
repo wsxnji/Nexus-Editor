@@ -16,7 +16,10 @@ import type {
   LivePreviewLabels,
   LivePreviewNodeType,
   LivePreviewRenderer,
+  TransclusionConfig,
 } from "./types";
+import { TransclusionWidget } from "./transclusion-widget";
+import { scanTransclusions, scanBlockRefLinks } from "./wikilinks";
 
 const COMPOSITION_REDECORATE_DELAY_MS = 60;
 
@@ -1034,6 +1037,8 @@ interface BuildContext {
   /** Optional pre-computed code highlight tokens for the snapshot's fenced blocks. */
   codeTokens?: CodeHighlightToken[];
   compositionActive?: boolean;
+  /** Transclusion configuration for `![[file#block-id]]` rendering. */
+  transclusion?: TransclusionConfig;
 }
 
 function buildDecorations(
@@ -1058,11 +1063,52 @@ function buildDecorations(
   // pairs hit the LRU in highlightCodeBlock so cursor moves don't re-tokenize.
   const codeTokens = ctx.codeTokens ?? highlightAllCodeBlocks(ast, doc);
   const t1b = perfEnabled ? performance.now() : 0;
-  const ranges = collectLivePreviewRanges(ast, doc, selection);
+  const { ranges, transclusions } = collectLivePreviewRanges(ast, doc, selection);
   const t2 = perfEnabled ? performance.now() : 0;
   const astHit = !!ctx.ast;
   const decos: Range<Decoration>[] = [];
   const parentSpans: [number, number][] = [];
+
+  // ── Transclusion widgets ─────────────────────────────────────────
+  if (transclusions.length > 0) {
+    for (const tm of transclusions) {
+      const cursorOnTransclusion = selectionIntersects(tm.from, tm.to, selection, true);
+      if (cursorOnTransclusion) continue; // show raw `![[  ]]` source when editing
+
+      const widget = new TransclusionWidget(
+        tm.file,
+        tm.blockId,
+        tm.display,
+        tm.from,
+        ctx.transclusion?.resolve,
+        viewRef,
+      );
+      decos.push(
+        Decoration.replace({
+          widget,
+          block: true,
+        }).range(tm.from, tm.to)
+      );
+    }
+  }
+
+  // ── Block-reference link decorations ─────────────────────────────
+  if (ctx.transclusion?.onNavigate) {
+    const blockRefs = scanBlockRefLinks(doc);
+    for (const bm of blockRefs) {
+      const cursorOnRef = selectionIntersects(bm.from, bm.to, selection, true);
+      if (cursorOnRef) continue;
+
+      const attrs: Record<string, string> = {
+        style: "color:var(--nexus-accent);cursor:pointer;text-decoration:underline;" +
+               "text-decoration-color:var(--nexus-accent);text-decoration-thickness:1px;",
+        "data-blockref-file": bm.file,
+        "data-blockref-blockid": bm.blockId ?? "",
+      };
+
+      decos.push(Decoration.mark({ attributes: attrs }).range(bm.from, bm.to));
+    }
+  }
 
   for (const range of ranges) {
     if (parentSpans.some(([from, to]) => range.from >= from && range.to <= to)) continue;
@@ -1300,7 +1346,8 @@ function buildDecorations(
 
 export function createLivePreviewExtension(
   config: boolean | LivePreviewConfig | undefined,
-  localeLabels?: LivePreviewLabels
+  localeLabels?: LivePreviewLabels,
+  transclusion?: TransclusionConfig,
 ): Extension[] {
   const normalized = normalizeConfig(config);
   if (!normalized.enabled) return [];
@@ -1323,8 +1370,8 @@ export function createLivePreviewExtension(
   function build(state: EditorState, selection: readonly SelectionRange[], reuseCache: boolean): DecorationSet {
     const docStr = state.doc.toString();
     const ctx: BuildContext = reuseCache && lastBuilt && lastBuilt.doc === docStr
-      ? { ast: lastBuilt.ast, codeTokens: lastBuilt.codeTokens }
-      : {};
+      ? { ast: lastBuilt.ast, codeTokens: lastBuilt.codeTokens, transclusion }
+      : { transclusion };
     try {
       const out = buildDecorations(state, selection, normalized, viewRef, {
         ...ctx,
@@ -1469,6 +1516,23 @@ export function createLivePreviewExtension(
     }
   });
 
+  // Click to navigate block-reference links: [[file#block-id]]
+  const blockRefHandler = EditorView.domEventHandlers({
+    mousedown(event, _view) {
+      if (!transclusion?.onNavigate) return false;
+      const target = event.target as HTMLElement;
+      const el = target.closest("[data-blockref-file]");
+      if (!el) return false;
+      const file = el.getAttribute("data-blockref-file");
+      if (!file) return false;
+      const blockId = el.getAttribute("data-blockref-blockid") || undefined;
+      event.preventDefault();
+      event.stopPropagation();
+      transclusion.onNavigate(file, blockId);
+      return true;
+    },
+  });
+
   // 表格被渲染成 block replace widget（整段源码折叠成一个不可逐字进入的部件），
   // 若不告诉 CodeMirror 这是原子区间，方向键上下移动时光标会"掉进"被折叠隐藏的
   // 表格源码里而卡住。把每个表格 widget 的范围登记为 atomicRange，让光标把表格当作
@@ -1490,5 +1554,5 @@ export function createLivePreviewExtension(
     return builder.finish();
   });
 
-  return [field, viewCapture, compositionHandler, linkHandler, tableAtomicRanges, createLivePreviewDiagnostics()];
+  return [field, viewCapture, compositionHandler, linkHandler, blockRefHandler, tableAtomicRanges, createLivePreviewDiagnostics()];
 }
